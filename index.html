@@ -406,197 +406,1168 @@
 </head>
 <body>
 <div id="toast-container"></div>
-<div id="root></div>
-  <!-- ONLY showing key parts you MUST replace/add -->
+<div id="root"></div>
 
 <script>
-// =========================
-// ✅ FIXED SUPABASE CONFIG
-// =========================
-const SUPABASE_URL = 'https://zgzamthhfykhjaldosvb.supabase.co'
-const SUPABASE_ANON_KEY = 'sb_publishable_T2qRKGsS33YJPN3BochPTA_r2v_gSlS'
+// ========================================================
+// CONFIG — Replace with your Supabase project values
+// ========================================================
+const SUPABASE_URL = 'https://YOUR_PROJECT.supabase.co'
+const SUPABASE_ANON_KEY = 'YOUR_ANON_KEY_HERE'
 
+const ADMIN_EMAILS = [
+  'opemuhammad35@gmail.com',
+  'sumudinnovation4@gmail.com',
+  'campusplug04@gmail.com',
+]
+
+// ========================================================
+// SUPABASE CLIENT
+// ========================================================
 const { createClient } = supabase
 const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 
+// ========================================================
+// UTILS
+// ========================================================
+let toastTimer = {}
+function toast(msg, type = 'info') {
+  const el = document.createElement('div')
+  el.className = `toast toast-${type}`
+  el.textContent = msg
+  document.getElementById('toast-container').appendChild(el)
+  setTimeout(() => el.remove(), 3500)
+}
 
-// =========================
-// ✅ LOAD USERS (FIXED + HUB DETECTION)
-// =========================
+function timeAgo(ts) {
+  const s = Math.floor((Date.now() - new Date(ts)) / 1000)
+  if (s < 60) return `${s}s ago`
+  if (s < 3600) return `${Math.floor(s/60)}m ago`
+  if (s < 86400) return `${Math.floor(s/3600)}h ago`
+  return `${Math.floor(s/86400)}d ago`
+}
+
+function fmtDate(ts) {
+  return new Date(ts).toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: 'numeric' })
+}
+
+function initials(name) {
+  return (name || '?').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()
+}
+
+function numFmt(n) {
+  if (n >= 1000) return (n/1000).toFixed(1) + 'k'
+  return String(n)
+}
+
+function confirmAction(msg) {
+  return window.confirm(msg)
+}
+
+// ========================================================
+// STATE
+// ========================================================
+let state = {
+  user: null,
+  profile: null,
+  page: 'overview',
+  loading: false,
+  // data
+  stats: { users: 0, posts: 0, listings: 0, orders: 0, reports: 0, verifications: 0 },
+  users: [], usersTotal: 0,
+  posts: [], postsTotal: 0,
+  listings: [],
+  orders: [],
+  reports: [],
+  hubPosts: [],
+  growthData: [],
+  uniBreakdown: [],
+  // filters
+  userSearch: '', userFilter: 'all',
+  postSearch: '', postFilter: 'all',
+  // modals
+  modal: null,  // { type, data }
+  // charts
+  charts: {},
+}
+
+// ========================================================
+// AUTH
+// ========================================================
+async function checkAuth() {
+  const { data: { session } } = await db.auth.getSession()
+  if (!session) { renderAuth(); return }
+  state.user = session.user
+  if (!ADMIN_EMAILS.includes(session.user.email)) {
+    renderAuthError('This email is not authorised to access the admin dashboard.')
+    return
+  }
+  const { data: profile } = await db.from('profiles').select('*, universities(name)').eq('id', session.user.id).single()
+  state.profile = profile
+  renderApp()
+  loadAll()
+}
+
+async function login(email, password) {
+  if (!ADMIN_EMAILS.includes(email.toLowerCase())) {
+    return 'This email does not have admin access.'
+  }
+  const { data, error } = await db.auth.signInWithPassword({ email, password })
+  if (error) return error.message
+  state.user = data.user
+  const { data: profile } = await db.from('profiles').select('*, universities(name)').eq('id', data.user.id).single()
+  state.profile = profile
+  renderApp()
+  loadAll()
+  return null
+}
+
+async function logout() {
+  await db.auth.signOut()
+  state.user = null; state.profile = null
+  renderAuth()
+}
+
+// ========================================================
+// DATA LOADING
+// ========================================================
+async function loadAll() {
+  await Promise.all([loadStats(), loadGrowthData(), loadUniBreakdown()])
+  if (state.page === 'users') loadUsers()
+  else if (state.page === 'posts') loadPosts()
+  else if (state.page === 'hub') loadHubPosts()
+  else if (state.page === 'orders') loadOrders()
+}
+
+async function loadStats() {
+  const [u, p, l, o] = await Promise.all([
+    db.from('profiles').select('*', { count: 'exact', head: true }),
+    db.from('posts').select('*', { count: 'exact', head: true }),
+    db.from('listings').select('*', { count: 'exact', head: true }),
+    db.from('orders').select('*', { count: 'exact', head: true }),
+  ])
+  const verified = await db.from('profiles').select('*', { count: 'exact', head: true }).eq('is_verified', true)
+  const restricted = await db.from('profiles').select('*', { count: 'exact', head: true }).eq('is_restricted', true)
+  state.stats = {
+    users: u.count || 0, posts: p.count || 0,
+    listings: l.count || 0, orders: o.count || 0,
+    verified: verified.count || 0, restricted: restricted.count || 0,
+  }
+  renderStats()
+}
+
+async function loadGrowthData() {
+  // Get users grouped by week for the last 12 weeks
+  const since = new Date(Date.now() - 84 * 86400 * 1000).toISOString()
+  const { data } = await db.from('profiles').select('created_at').gte('created_at', since).order('created_at')
+  if (!data) return
+  // Group by week
+  const weeks = {}
+  data.forEach(row => {
+    const d = new Date(row.created_at)
+    const week = new Date(d.setDate(d.getDate() - d.getDay())).toLocaleDateString('en-NG', { month: 'short', day: 'numeric' })
+    weeks[week] = (weeks[week] || 0) + 1
+  })
+  state.growthData = Object.entries(weeks).map(([label, count]) => ({ label, count }))
+  renderCharts()
+}
+
+async function loadUniBreakdown() {
+  const { data } = await db.from('profiles').select('universities(name)').not('university_id', 'is', null)
+  if (!data) return
+  const counts = {}
+  data.forEach(r => {
+    const name = r.universities?.name || 'Unknown'
+    counts[name] = (counts[name] || 0) + 1
+  })
+  const total = Object.values(counts).reduce((a, b) => a + b, 0)
+  state.uniBreakdown = Object.entries(counts).map(([name, count]) => ({ name, count, pct: Math.round(count/total*100) })).sort((a,b) => b.count - a.count)
+  renderUniBreakdown()
+}
+
 async function loadUsers() {
-
-  // 🔥 get hub users from posts
-  const { data: hubPosts } = await db
-    .from('posts')
-    .select('author_id')
-    .eq('is_hub_service', true)
-
-  const hubIds = new Set(hubPosts?.map(p => p.author_id))
-
   let q = db.from('profiles')
     .select('*, universities(name)', { count: 'exact' })
     .order('created_at', { ascending: false })
     .limit(100)
-
-  const { data, count, error } = await q
-
-  if (error) {
-    toast(error.message, 'error')
-    return
-  }
-
-  state.users = (data || []).map(u => ({
-    ...u,
-    is_hub: hubIds.has(u.id)
-  }))
-
+  if (state.userSearch) q = q.or(`username.ilike.%${state.userSearch}%,full_name.ilike.%${state.userSearch}%`)
+  if (state.userFilter === 'admin') q = q.eq('is_admin', true)
+  if (state.userFilter === 'verified') q = q.eq('is_verified', true)
+  if (state.userFilter === 'restricted') q = q.eq('is_restricted', true)
+  if (state.userFilter === 'banned') q = q.eq('is_banned', true)
+  const { data, count } = await q
+  state.users = data || []
   state.usersTotal = count || 0
   renderUsers()
 }
 
-
-// =========================
-// ✅ LOAD POSTS (SAFE)
-// =========================
 async function loadPosts() {
   let q = db.from('posts')
-    .select(`
-      *,
-      profiles(username, full_name, is_verified),
-      universities(name)
-    `, { count: 'exact' })
+    .select('*, profiles(username, full_name, is_verified), universities(name)', { count: 'exact' })
     .order('created_at', { ascending: false })
     .limit(100)
-
-  const { data, count, error } = await q
-
-  if (error) {
-    toast(error.message, 'error')
-    return
-  }
-
+  if (state.postFilter === 'hub') q = q.eq('is_hub_service', true)
+  if (state.postFilter === 'flagged') q = q.eq('is_flagged', true)
+  if (state.postSearch) q = q.ilike('content', `%${state.postSearch}%`)
+  const { data, count } = await q
   state.posts = data || []
   state.postsTotal = count || 0
   renderPosts()
 }
 
-
-// =========================
-// ✅ VERIFY USER (WORKING)
-// =========================
-async function toggleVerified(userId, current) {
-  const { error } = await db
-    .from('profiles')
-    .update({ is_verified: !current })
-    .eq('id', userId)
-
-  if (error) {
-    toast(error.message, 'error')
-    return
-  }
-
-  toast(current ? 'Verification removed' : 'User verified', 'success')
-
-  loadUsers()
-  loadStats()
+async function loadHubPosts() {
+  const { data } = await db.from('posts')
+    .select('*, profiles(username, full_name, avatar_url), hub_polls(id, question, options, ends_at)')
+    .eq('is_hub_service', true)
+    .order('created_at', { ascending: false })
+    .limit(50)
+  state.hubPosts = data || []
+  renderHubPosts()
 }
 
+async function loadOrders() {
+  const { data } = await db.from('orders')
+    .select('*, listings(title), buyer:buyer_id(username), seller:seller_id(username)')
+    .order('created_at', { ascending: false })
+    .limit(100)
+  state.orders = data || []
+  renderOrders()
+}
 
-// =========================
-// ✅ DELETE POST (FIXED)
-// =========================
+// ========================================================
+// ACTIONS
+// ========================================================
 async function deletePost(postId) {
-  if (!confirm('Delete this post permanently?')) return
-
-  const { error } = await db
-    .from('posts')
-    .delete()
-    .eq('id', postId)
-
-  if (error) {
-    toast(error.message, 'error')
-    return
-  }
-
+  if (!confirmAction('Permanently delete this post? This cannot be undone.')) return
+  const { error } = await db.from('posts').delete().eq('id', postId)
+  if (error) { toast('Failed: ' + error.message, 'error'); return }
   toast('Post deleted', 'success')
-  loadPosts()
+  loadPosts(); loadStats()
 }
 
+async function toggleVerified(userId, current) {
+  const { error } = await db.from('profiles').update({ is_verified: !current }).eq('id', userId)
+  if (error) { toast('Failed: ' + error.message, 'error'); return }
+  toast(current ? 'Verification removed' : '✓ User verified', 'success')
+  loadUsers(); loadStats()
+}
 
-// =========================
-// ✅ HUB DELETE FIX
-// =========================
+async function toggleRestricted(userId, current) {
+  const { error } = await db.from('profiles').update({ is_restricted: !current }).eq('id', userId)
+  if (error) { toast('Failed', 'error'); return }
+  toast(current ? 'Restriction lifted' : '⚠️ Account restricted', 'success')
+  loadUsers(); loadStats()
+}
+
+async function toggleBanned(userId, current) {
+  if (!current && !confirmAction('Ban this user? They will not be able to log in.')) return
+  const { error } = await db.from('profiles').update({ is_banned: !current }).eq('id', userId)
+  if (error) { toast('Failed', 'error'); return }
+  toast(current ? 'User unbanned' : '🚫 User banned', current ? 'info' : 'error')
+  loadUsers(); loadStats()
+}
+
+async function toggleAdmin(userId, current) {
+  const { error } = await db.from('profiles').update({ is_admin: !current }).eq('id', userId)
+  if (error) { toast('Failed', 'error'); return }
+  toast(current ? 'Admin revoked' : '👑 Admin granted', 'success')
+  loadUsers()
+}
+
+async function deleteUser(userId) {
+  if (!confirmAction('Delete this account permanently? All posts and data will be removed.')) return
+  const { error } = await db.from('profiles').delete().eq('id', userId)
+  if (error) { toast('Failed: ' + error.message, 'error'); return }
+  toast('Account deleted', 'success')
+  loadUsers(); loadStats()
+}
+
+async function publishHubPost(content, pollMode, pollOptions, endsIn, mediaNote) {
+  if (!content.trim()) { toast('Write some content first', 'error'); return false }
+  const { data: postData, error } = await db.from('posts').insert({
+    author_id: state.user.id,
+    content,
+    is_hub_service: true,
+    post_type: pollMode ? 'poll' : 'text',
+    university_id: null,
+  }).select().single()
+  if (error) { toast('Failed: ' + error.message, 'error'); return false }
+
+  if (pollMode && postData) {
+    const options = pollOptions.filter(o => o.trim()).map((label, i) => ({ id: String(i), label }))
+    const endsAt = new Date(Date.now() + endsIn * 3600 * 1000).toISOString()
+    await db.from('hub_polls').insert({ post_id: postData.id, question: content, options, ends_at: endsAt })
+  }
+  toast('📢 Hub post published to all campuses!', 'success')
+  closeModal()
+  loadHubPosts()
+  return true
+}
+
 async function deleteHubPost(postId) {
-  if (!confirm('Delete this hub post?')) return
-
+  if (!confirmAction('Delete this hub post from all university timelines?')) return
   await db.from('hub_polls').delete().eq('post_id', postId)
   await db.from('posts').delete().eq('id', postId)
-
   toast('Hub post deleted', 'success')
   loadHubPosts()
 }
 
-
-// =========================
-// 🖤 TICK SYSTEM (IMPORTANT)
-// =========================
-function getUserBadge(u) {
-  if (u.is_hub) {
-    return '<span style="color:black;font-weight:900;margin-left:6px">✔</span>'
-  }
-
-  if (u.is_verified) {
-    return '<span style="color:#3B82F6;margin-left:6px">✔</span>'
-  }
-
-  return ''
+async function updateOrderStatus(orderId, status) {
+  await db.from('orders').update({ status }).eq('id', orderId)
+  toast('Order updated', 'success')
+  loadOrders()
 }
 
-
-// =========================
-// ✅ UPDATE USER DISPLAY
-// =========================
-// FIND everywhere you show user name and REPLACE WITH:
-
-// Example:
-function renderUserName(u) {
-  return `
-    <span style="font-weight:600">
-      ${u.full_name || u.username}
-      ${getUserBadge(u)}
-    </span>
-  `
+// ========================================================
+// MODALS
+// ========================================================
+function openModal(type, data = {}) {
+  state.modal = { type, data }
+  renderModal()
 }
 
+function closeModal() {
+  state.modal = null
+  const el = document.getElementById('modal-root')
+  if (el) el.innerHTML = ''
+}
 
-// =========================
-// ✅ FIX RECENT USERS
-// =========================
-async function loadRecentUsers() {
-  const { data } = await db
-    .from('profiles')
-    .select('*')
-    .order('created_at', { ascending: false })
-    .limit(6)
+function renderModal() {
+  let html = ''
+  const m = state.modal
+  if (!m) return
 
-  const el = document.getElementById('recent-users-list')
-  if (!el) return
-
-  el.innerHTML = data.map(u => `
-    <div style="display:flex;align-items:center;gap:10px;padding:12px">
-      <div class="user-avatar">${initials(u.full_name || u.username)}</div>
-      <div>
-        <div>
-          ${u.full_name || u.username}
-          ${u.is_verified ? '<span style="color:#3B82F6">✔</span>' : ''}
+  if (m.type === 'userDetail') {
+    const u = m.data
+    html = `
+    <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title">User Detail</span>
+          <button class="modal-close" onclick="closeModal()">✕</button>
         </div>
-        <div style="font-size:11px;color:#888">@${u.username}</div>
+        <div class="modal-body">
+          <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;padding:16px;background:var(--surface2);border-radius:10px">
+            <div class="user-avatar" style="width:52px;height:52px;font-size:18px">${initials(u.full_name || u.username)}</div>
+            <div>
+              <div style="font-size:17px;font-weight:700">${u.full_name || u.username}
+                ${u.is_verified ? '<span class="badge badge-verified" style="margin-left:6px">✓ Verified</span>' : ''}
+                ${u.is_admin ? '<span class="badge badge-admin" style="margin-left:4px">Admin</span>' : ''}
+              </div>
+              <div style="color:var(--text3);font-size:13px">@${u.username} · ${u.universities?.name || 'No university'}</div>
+              <div style="color:var(--text3);font-size:12px;margin-top:2px">${u.id}</div>
+            </div>
+          </div>
+          ${u.bio ? `<div style="background:var(--bg2);padding:12px;border-radius:8px;font-size:13px;color:var(--text2);margin-bottom:16px;border:1px solid var(--border)">${u.bio}</div>` : ''}
+          <div class="form-row" style="margin-bottom:16px">
+            <div style="background:var(--bg2);padding:12px;border-radius:8px;text-align:center">
+              <div style="font-size:11px;color:var(--text3);margin-bottom:4px">JOINED</div>
+              <div style="font-weight:600;font-size:13px">${fmtDate(u.created_at)}</div>
+            </div>
+            <div style="background:var(--bg2);padding:12px;border-radius:8px;text-align:center">
+              <div style="font-size:11px;color:var(--text3);margin-bottom:4px">STATUS</div>
+              <div style="font-weight:600;font-size:13px;color:${u.is_banned ? 'var(--red)' : u.is_restricted ? 'var(--accent)' : 'var(--green)'}">
+                ${u.is_banned ? '🚫 Banned' : u.is_restricted ? '⚠️ Restricted' : '✓ Active'}
+              </div>
+            </div>
+          </div>
+          <div class="divider"></div>
+          <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px">Actions</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            <button class="btn btn-blue" onclick="toggleVerified('${u.id}', ${u.is_verified}); closeModal()">
+              ${u.is_verified ? '✗ Remove Verification' : '✓ Grant Verification Badge'}
+            </button>
+            <button class="btn btn-warn" onclick="toggleRestricted('${u.id}', ${u.is_restricted}); closeModal()">
+              ${u.is_restricted ? 'Lift Restriction' : '⚠ Restrict Account'}
+            </button>
+            <button class="btn btn-ghost" onclick="toggleAdmin('${u.id}', ${u.is_admin}); closeModal()">
+              ${u.is_admin ? 'Revoke Admin' : '👑 Make Admin'}
+            </button>
+            <button class="btn btn-danger" onclick="toggleBanned('${u.id}', ${u.is_banned}); closeModal()">
+              ${u.is_banned ? 'Unban User' : '🚫 Ban User'}
+            </button>
+            <button class="btn btn-danger" onclick="deleteUser('${u.id}'); closeModal()" style="background:rgba(239,68,68,0.25)">
+              🗑 Delete Account
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>`
+  }
+
+  if (m.type === 'hubPost') {
+    html = `
+    <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title">📢 Create Hub Post</span>
+          <button class="modal-close" onclick="closeModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div style="background:rgba(124,58,237,0.1);border:1px solid rgba(124,58,237,0.3);border-radius:8px;padding:10px 14px;font-size:13px;color:#C4B5FD;margin-bottom:16px">
+            ⚡ This post will appear on <strong>every university's</strong> Yard timeline as a Hub Services post.
+          </div>
+          <div class="form-group">
+            <label class="form-label">Content / Announcement</label>
+            <textarea class="form-textarea" id="hub-content" placeholder="Write an announcement, event notice, or poll question..." style="min-height:120px"></textarea>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+            <input type="checkbox" id="hub-poll-toggle" onchange="document.getElementById('hub-poll-section').style.display=this.checked?'block':'none'" style="width:16px;height:16px;accent-color:var(--brand)">
+            <label for="hub-poll-toggle" style="font-size:14px;font-weight:600;cursor:pointer">Add a Poll / Voice Cast</label>
+          </div>
+          <div id="hub-poll-section" style="display:none;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px">
+            <div class="form-label">Poll Options</div>
+            <div id="poll-options">
+              <input class="form-input" style="margin-bottom:8px" placeholder="Option 1" id="poll-opt-0">
+              <input class="form-input" style="margin-bottom:8px" placeholder="Option 2" id="poll-opt-1">
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="addPollOption()" style="margin-bottom:12px">+ Add Option</button>
+            <div class="form-label" style="margin-top:4px">Poll Duration</div>
+            <select class="form-select" id="hub-ends-in">
+              <option value="24">24 hours</option>
+              <option value="48" selected>48 hours</option>
+              <option value="72">3 days</option>
+              <option value="168">1 week</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-primary btn-lg" onclick="submitHubPost()">📢 Publish to All Campuses</button>
+        </div>
+      </div>
+    </div>`
+  }
+
+  if (m.type === 'postDetail') {
+    const p = m.data
+    html = `
+    <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title">Post Detail</span>
+          <button class="modal-close" onclick="closeModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+            <div class="user-avatar">${initials(p.profiles?.full_name || p.profiles?.username)}</div>
+            <div>
+              <div style="font-weight:600">@${p.profiles?.username} ${p.profiles?.is_verified ? '<span style="color:var(--blue)">✓</span>' : ''}</div>
+              <div style="font-size:11px;color:var(--text3)">${fmtDate(p.created_at)} · ${p.universities?.name || (p.is_hub_service ? 'Hub (All Campuses)' : 'Unknown')}</div>
+            </div>
+            ${p.is_hub_service ? '<span class="badge badge-hub" style="margin-left:auto">⚡ Hub</span>' : ''}
+          </div>
+          <div style="background:var(--bg2);padding:14px;border-radius:10px;font-size:14px;line-height:1.6;color:var(--text);margin-bottom:14px;border:1px solid var(--border)">
+            ${p.content || '<em style="color:var(--text3)">No text content</em>'}
+          </div>
+          ${p.media_urls?.length ? `<div style="font-size:12px;color:var(--text3);margin-bottom:10px">📎 ${p.media_urls.length} media attachment(s)</div>` : ''}
+          <div style="display:flex;gap:16px;font-size:13px;color:var(--text3);margin-bottom:16px">
+            <span>❤️ ${p.like_count || 0} likes</span>
+            <span>💬 ${p.comment_count || 0} comments</span>
+            <span>🔁 ${p.repost_count || 0} reposts</span>
+            <span>👁 ${p.view_count || 0} views</span>
+          </div>
+          <div class="divider"></div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-danger" onclick="deletePost('${p.id}'); closeModal()">🗑 Delete Post</button>
+          </div>
+        </div>
+      </div>
+    </div>`
+  }
+
+  let el = document.getElementById('modal-root')
+  if (!el) { el = document.createElement('div'); el.id = 'modal-root'; document.body.appendChild(el) }
+  el.innerHTML = html
+}
+
+let pollOptCount = 2
+function addPollOption() {
+  const container = document.getElementById('poll-options')
+  if (!container || pollOptCount >= 6) return
+  const input = document.createElement('input')
+  input.className = 'form-input'
+  input.style.marginBottom = '8px'
+  input.placeholder = `Option ${pollOptCount + 1}`
+  input.id = `poll-opt-${pollOptCount}`
+  container.appendChild(input)
+  pollOptCount++
+}
+
+async function submitHubPost() {
+  const content = document.getElementById('hub-content')?.value || ''
+  const pollMode = document.getElementById('hub-poll-toggle')?.checked || false
+  const endsIn = parseInt(document.getElementById('hub-ends-in')?.value || '48')
+  const opts = []
+  for (let i = 0; i < pollOptCount; i++) {
+    const v = document.getElementById(`poll-opt-${i}`)?.value || ''
+    if (v.trim()) opts.push(v.trim())
+  }
+  pollOptCount = 2
+  await publishHubPost(content, pollMode, opts, endsIn, '')
+}
+
+// ========================================================
+// RENDER — AUTH
+// ========================================================
+function renderAuth() {
+  document.getElementById('root').innerHTML = `
+  <div class="auth-screen">
+    <div class="auth-card">
+      <div class="auth-logo">Campus Plug</div>
+      <div class="auth-sub">Admin Dashboard — Authorised Access Only</div>
+      <div id="auth-err"></div>
+      <label class="auth-label">Email Address</label>
+      <input class="auth-input" type="email" id="auth-email" placeholder="admin@example.com" autocomplete="username">
+      <label class="auth-label">Password</label>
+      <input class="auth-input" type="password" id="auth-pass" placeholder="••••••••" autocomplete="current-password"
+        onkeydown="if(event.key==='Enter')doLogin()">
+      <button class="auth-btn" id="auth-btn" onclick="doLogin()">Sign In to Dashboard</button>
+      <div style="margin-top:20px;padding:12px;background:rgba(124,58,237,0.08);border-radius:8px;font-size:12px;color:var(--text3);text-align:center">
+        🔒 Only authorised admin emails can access this panel
       </div>
     </div>
-  `).join('')
+  </div>`
 }
 
-</script>
+function renderAuthError(msg) {
+  document.getElementById('root').innerHTML = `
+  <div class="auth-screen">
+    <div class="auth-card" style="text-align:center">
+      <div style="font-size:48px;margin-bottom:16px">🚫</div>
+      <div class="auth-logo">Access Denied</div>
+      <div style="color:var(--text3);margin:12px 0 24px;font-size:14px">${msg}</div>
+      <button class="auth-btn" onclick="logout()">Sign Out</button>
+    </div>
+  </div>`
+}
 
+async function doLogin() {
+  const email = document.getElementById('auth-email').value.trim()
+  const pass = document.getElementById('auth-pass').value
+  const btn = document.getElementById('auth-btn')
+  const errEl = document.getElementById('auth-err')
+  errEl.innerHTML = ''
+  btn.disabled = true; btn.textContent = 'Signing in...'
+  const err = await login(email, pass)
+  if (err) {
+    errEl.innerHTML = `<div class="auth-err">${err}</div>`
+    btn.disabled = false; btn.textContent = 'Sign In to Dashboard'
+  }
+}
+
+// ========================================================
+// RENDER — APP SHELL
+// ========================================================
+function renderApp() {
+  const p = state.profile
+  const adminName = p?.full_name || p?.username || state.user?.email?.split('@')[0] || 'Admin'
+  document.getElementById('root').innerHTML = `
+  <div class="sidebar">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-text">⚡ Campus Plug</div>
+      <div class="sidebar-logo-sub">Admin Control Center</div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Main</div>
+      ${navItem('overview','📊','Overview')}
+      ${navItem('users','👥','Users')}
+      ${navItem('posts','📝','Posts & Content')}
+      ${navItem('hub','📢','Hub Services')}
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Commerce</div>
+      ${navItem('listings','🛍','Listings')}
+      ${navItem('orders','📦','Orders')}
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Settings</div>
+      ${navItem('universities','🎓','Universities')}
+    </div>
+    <div class="sidebar-footer">
+      <div class="sidebar-user">
+        <div class="sidebar-avatar">${initials(adminName)}</div>
+        <div>
+          <div class="sidebar-user-name">${adminName}</div>
+          <div class="sidebar-user-role">👑 Super Admin</div>
+        </div>
+        <button class="logout-btn" onclick="logout()" title="Sign out">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+  <div class="main" id="main">
+    <div class="topbar" id="topbar">
+      <div>
+        <div class="topbar-title" id="topbar-title">Overview</div>
+        <div class="topbar-sub" id="topbar-sub">Welcome back, ${adminName}</div>
+      </div>
+      <div class="topbar-right">
+        <span class="topbar-badge" id="live-badge">● Live</span>
+        <button class="btn btn-primary" onclick="openModal('hubPost')">📢 New Hub Post</button>
+      </div>
+    </div>
+    <div class="page" id="page-content">
+      <div class="loader"><div class="spinner"></div></div>
+    </div>
+  </div>`
+  navigateTo('overview')
+}
+
+function navItem(id, icon, label) {
+  return `<button class="nav-item ${state.page===id?'active':''}" id="nav-${id}" onclick="navigateTo('${id}')">${icon} ${label}</button>`
+}
+
+function navigateTo(page) {
+  state.page = page
+  // Update active nav
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'))
+  const nav = document.getElementById(`nav-${page}`)
+  if (nav) nav.classList.add('active')
+
+  const titles = {
+    overview: ['Overview', 'Platform health at a glance'],
+    users: ['Users', 'Manage student accounts'],
+    posts: ['Posts & Content', 'Moderate and review posts'],
+    hub: ['Hub Services', 'Post announcements to all campuses'],
+    listings: ['Marketplace', 'Products and services listed'],
+    orders: ['Orders', 'Track and manage orders'],
+    universities: ['Universities', 'Manage campuses'],
+  }
+  const [title, sub] = titles[page] || [page, '']
+  document.getElementById('topbar-title').textContent = title
+  document.getElementById('topbar-sub').textContent = sub
+
+  const pc = document.getElementById('page-content')
+  pc.innerHTML = '<div class="loader"><div class="spinner"></div></div>'
+
+  if (page === 'overview') renderOverview()
+  else if (page === 'users') { loadUsers(); }
+  else if (page === 'posts') { loadPosts(); }
+  else if (page === 'hub') { loadHubPosts(); }
+  else if (page === 'listings') { loadListings(); }
+  else if (page === 'orders') { loadOrders(); }
+  else if (page === 'universities') { loadUniversities(); }
+}
+
+// ========================================================
+// RENDER — OVERVIEW
+// ========================================================
+function renderOverview() {
+  const pc = document.getElementById('page-content')
+  pc.innerHTML = `
+    <div class="stats-grid" id="stats-grid">
+      ${statCard('👥', 'Total Users', state.stats.users, 'purple')}
+      ${statCard('📝', 'Total Posts', state.stats.posts, 'green')}
+      ${statCard('🛍', 'Listings', state.stats.listings, 'amber')}
+      ${statCard('📦', 'Orders', state.stats.orders, 'blue')}
+      ${statCard('✓', 'Verified Users', state.stats.verified || 0, 'green')}
+      ${statCard('⚠', 'Restricted', state.stats.restricted || 0, 'red')}
+    </div>
+
+    <div class="charts-grid">
+      <div class="chart-card">
+        <div class="chart-title">User Growth</div>
+        <div class="chart-sub">New signups over the last 12 weeks</div>
+        <div class="chart-wrap"><canvas id="growth-chart"></canvas></div>
+      </div>
+      <div class="chart-card" id="uni-breakdown-card">
+        <div class="chart-title">University Breakdown</div>
+        <div class="chart-sub">Students by campus</div>
+        <div id="uni-breakdown"></div>
+        <div class="chart-wrap" style="height:180px"><canvas id="uni-pie-chart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Recent Users</span>
+          <span class="card-count">${state.stats.users} total</span>
+          <div class="card-actions"><button class="btn btn-ghost btn-sm" onclick="navigateTo('users')">View All →</button></div>
+        </div>
+        <div id="recent-users-list"><div class="loader"><div class="spinner"></div></div></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Hub Posts</span>
+          <div class="card-actions"><button class="btn btn-primary btn-sm" onclick="openModal('hubPost')">+ New</button></div>
+        </div>
+        <div id="recent-hub-list"><div class="loader"><div class="spinner"></div></div></div>
+      </div>
+    </div>`
+
+  renderCharts()
+  renderUniBreakdown()
+  loadRecentUsers()
+  loadRecentHub()
+}
+
+function statCard(icon, label, value, color) {
+  return `<div class="stat-card ${color}">
+    <div class="stat-icon ${color}">${icon}</div>
+    <div class="stat-num">${numFmt(value)}</div>
+    <div class="stat-label">${label}</div>
+  </div>`
+}
+
+function renderStats() {
+  const el = document.getElementById('stats-grid')
+  if (!el) return
+  el.innerHTML = `
+    ${statCard('👥', 'Total Users', state.stats.users, 'purple')}
+    ${statCard('📝', 'Total Posts', state.stats.posts, 'green')}
+    ${statCard('🛍', 'Listings', state.stats.listings, 'amber')}
+    ${statCard('📦', 'Orders', state.stats.orders, 'blue')}
+    ${statCard('✓', 'Verified Users', state.stats.verified || 0, 'green')}
+    ${statCard('⚠', 'Restricted', state.stats.restricted || 0, 'red')}`
+}
+
+async function loadRecentUsers() {
+  const { data } = await db.from('profiles').select('*, universities(name)').order('created_at', { ascending: false }).limit(6)
+  const el = document.getElementById('recent-users-list')
+  if (!el || !data) return
+  el.innerHTML = data.map(u => `
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border);cursor:pointer" onclick='openModal("userDetail", ${JSON.stringify(u).replace(/'/g, "&#39;")})'>
+      <div class="user-avatar">${initials(u.full_name || u.username)}</div>
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:13px">${u.full_name || u.username} ${u.is_verified?'<span style="color:var(--blue);font-size:12px">✓</span>':''}</div>
+        <div style="font-size:11px;color:var(--text3)">@${u.username} · ${u.universities?.name || 'No uni'}</div>
+      </div>
+      <div style="font-size:11px;color:var(--text3)">${timeAgo(u.created_at)}</div>
+    </div>`).join('')
+}
+
+async function loadRecentHub() {
+  const { data } = await db.from('posts').select('*, hub_polls(*)').eq('is_hub_service', true).order('created_at', { ascending: false }).limit(5)
+  const el = document.getElementById('recent-hub-list')
+  if (!el) return
+  if (!data?.length) { el.innerHTML = '<div class="empty"><div class="empty-icon">📢</div><div class="empty-title">No hub posts yet</div></div>'; return }
+  el.innerHTML = data.map(p => `
+    <div style="padding:14px 16px;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span class="badge badge-hub">⚡ Hub</span>
+        ${p.hub_polls?.length ? '<span class="badge badge-admin">Poll</span>' : ''}
+        <span style="font-size:11px;color:var(--text3);margin-left:auto">${timeAgo(p.created_at)}</span>
+      </div>
+      <div class="post-preview-text">${p.content || ''}</div>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <span style="font-size:11px;color:var(--text3)">❤️ ${p.like_count||0} · 👁 ${p.view_count||0}</span>
+        <button class="btn btn-danger btn-sm" style="margin-left:auto" onclick="deleteHubPost('${p.id}')">Delete</button>
+      </div>
+    </div>`).join('')
+}
+
+function renderCharts() {
+  if (!state.growthData.length) return
+  // Destroy old
+  if (state.charts.growth) { state.charts.growth.destroy() }
+  if (state.charts.uniPie) { state.charts.uniPie.destroy() }
+
+  const gCtx = document.getElementById('growth-chart')
+  if (gCtx) {
+    state.charts.growth = new Chart(gCtx, {
+      type: 'line',
+      data: {
+        labels: state.growthData.map(d => d.label),
+        datasets: [{
+          label: 'New Users',
+          data: state.growthData.map(d => d.count),
+          borderColor: '#7C3AED',
+          backgroundColor: 'rgba(124,58,237,0.1)',
+          borderWidth: 2.5,
+          pointBackgroundColor: '#7C3AED',
+          pointRadius: 4,
+          fill: true,
+          tension: 0.4,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#6B6894', font: { size: 11 } } },
+          y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#6B6894', font: { size: 11 }, precision: 0 } }
+        }
+      }
+    })
+  }
+
+  const pCtx = document.getElementById('uni-pie-chart')
+  if (pCtx && state.uniBreakdown.length) {
+    const colors = ['#7C3AED', '#10B981', '#F59E0B', '#3B82F6', '#F97316', '#EF4444']
+    state.charts.uniPie = new Chart(pCtx, {
+      type: 'doughnut',
+      data: {
+        labels: state.uniBreakdown.map(u => u.name),
+        datasets: [{
+          data: state.uniBreakdown.map(u => u.count),
+          backgroundColor: colors,
+          borderWidth: 2, borderColor: '#1E1B2E'
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'bottom', labels: { color: '#A8A3C8', font: { size: 11 }, boxWidth: 12 } }
+        },
+        cutout: '65%'
+      }
+    })
+  }
+}
+
+function renderUniBreakdown() {
+  const el = document.getElementById('uni-breakdown')
+  if (!el || !state.uniBreakdown.length) return
+  const colors = ['#7C3AED', '#10B981', '#F59E0B', '#3B82F6', '#F97316']
+  el.innerHTML = state.uniBreakdown.map((u, i) => `
+    <div class="uni-bar-wrap">
+      <div class="uni-bar-label">
+        <span style="font-size:12.5px;font-weight:600">${u.name}</span>
+        <span style="font-size:12px;color:var(--text3)">${u.count} (${u.pct}%)</span>
+      </div>
+      <div class="uni-bar-track">
+        <div class="uni-bar-fill" style="width:${u.pct}%;background:${colors[i%colors.length]}"></div>
+      </div>
+    </div>`).join('')
+}
+
+// ========================================================
+// RENDER — USERS
+// ========================================================
+function renderUsers() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  if (!document.getElementById('users-table')) {
+    pc.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">All Users</span>
+          <span class="card-count" id="users-count">${state.usersTotal} total</span>
+          <div class="card-actions">
+            <input class="search-box" placeholder="Search name or username..." id="user-search" value="${state.userSearch}"
+              oninput="state.userSearch=this.value;debounceLoad('users')" />
+            <select class="filter-select" id="user-filter" onchange="state.userFilter=this.value;loadUsers()">
+              <option value="all" ${state.userFilter==='all'?'selected':''}>All Users</option>
+              <option value="verified" ${state.userFilter==='verified'?'selected':''}>Verified</option>
+              <option value="admin" ${state.userFilter==='admin'?'selected':''}>Admins</option>
+              <option value="restricted" ${state.userFilter==='restricted'?'selected':''}>Restricted</option>
+              <option value="banned" ${state.userFilter==='banned'?'selected':''}>Banned</option>
+            </select>
+          </div>
+        </div>
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr>
+              <th>User</th><th>University</th><th>Status</th><th>Joined</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="users-table"></tbody>
+          </table>
+        </div>
+      </div>`
+  }
+  document.getElementById('users-count').textContent = `${state.usersTotal} total`
+  const tb = document.getElementById('users-table')
+  if (!tb) return
+  if (!state.users.length) { tb.innerHTML = `<tr><td colspan="5"><div class="empty"><div class="empty-icon">👥</div><div class="empty-title">No users found</div></div></td></tr>`; return }
+  tb.innerHTML = state.users.map(u => `
+    <tr>
+      <td>
+        <div class="user-cell">
+          <div class="user-avatar">${initials(u.full_name || u.username)}</div>
+          <div>
+            <div class="user-name">${u.full_name || u.username}
+              ${u.is_verified ? '<span style="color:var(--blue);margin-left:4px" title="Verified">✓</span>' : ''}
+            </div>
+            <div class="user-handle">@${u.username}</div>
+          </div>
+        </div>
+      </td>
+      <td style="font-size:13px;color:var(--text2)">${u.universities?.name || '—'}</td>
+      <td>
+        ${u.is_banned ? '<span class="badge badge-banned">🚫 Banned</span>' :
+          u.is_restricted ? '<span class="badge badge-restricted">⚠ Restricted</span>' :
+          u.is_admin ? '<span class="badge badge-admin">👑 Admin</span>' :
+          u.is_verified ? '<span class="badge badge-verified">✓ Verified</span>' :
+          '<span class="badge badge-active">● Active</span>'}
+      </td>
+      <td style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
+      <td>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm" onclick='openModal("userDetail",${JSON.stringify(u).replace(/'/g,"&#39;")})'>View</button>
+          <button class="btn btn-blue btn-sm" onclick="toggleVerified('${u.id}',${u.is_verified})">${u.is_verified?'Unverify':'Verify'}</button>
+          <button class="btn btn-warn btn-sm" onclick="toggleRestricted('${u.id}',${u.is_restricted})">${u.is_restricted?'Unrestrict':'Restrict'}</button>
+          <button class="btn btn-danger btn-sm" onclick="toggleBanned('${u.id}',${u.is_banned})">${u.is_banned?'Unban':'Ban'}</button>
+        </div>
+      </td>
+    </tr>`).join('')
+}
+
+// ========================================================
+// RENDER — POSTS
+// ========================================================
+function renderPosts() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  if (!document.getElementById('posts-table')) {
+    pc.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">All Posts</span>
+          <span class="card-count" id="posts-count">${state.postsTotal}</span>
+          <div class="card-actions">
+            <input class="search-box" placeholder="Search content..." id="post-search" value="${state.postSearch}"
+              oninput="state.postSearch=this.value;debounceLoad('posts')" />
+            <select class="filter-select" onchange="state.postFilter=this.value;loadPosts()">
+              <option value="all">All Posts</option>
+              <option value="hub">Hub Posts</option>
+              <option value="flagged">Flagged</option>
+            </select>
+          </div>
+        </div>
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr>
+              <th>Author</th><th>Content</th><th>Campus</th><th>Stats</th><th>Date</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="posts-table"></tbody>
+          </table>
+        </div>
+      </div>`
+  }
+  document.getElementById('posts-count').textContent = state.postsTotal
+  const tb = document.getElementById('posts-table')
+  if (!tb) return
+  if (!state.posts.length) { tb.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-icon">📝</div><div class="empty-title">No posts found</div></div></td></tr>`; return }
+  tb.innerHTML = state.posts.map(p => `
+    <tr>
+      <td>
+        <div class="user-cell">
+          <div class="user-avatar" style="width:28px;height:28px;font-size:11px">${initials(p.profiles?.full_name||p.profiles?.username)}</div>
+          <span style="font-size:13px;font-weight:600">@${p.profiles?.username||'?'}</span>
+        </div>
+      </td>
+      <td style="max-width:280px">
+        <div class="post-preview-text">${p.content || '<em style="color:var(--text3)">No text</em>'}</div>
+        <div style="margin-top:4px;display:flex;gap:4px">
+          ${p.is_hub_service ? '<span class="badge badge-hub" style="font-size:10px">⚡Hub</span>' : ''}
+          ${p.media_urls?.length ? `<span class="badge badge-post" style="font-size:10px">📎 ${p.media_urls.length}</span>` : ''}
+        </div>
+      </td>
+      <td style="font-size:12px;color:var(--text3)">${p.is_hub_service ? 'All Campuses' : (p.universities?.name||'—')}</td>
+      <td style="font-size:12px;color:var(--text3);white-space:nowrap">
+        ❤️${p.like_count||0} 💬${p.comment_count||0} 🔁${p.repost_count||0}
+      </td>
+      <td style="font-size:12px;color:var(--text3);white-space:nowrap">${fmtDate(p.created_at)}</td>
+      <td>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-ghost btn-sm" onclick='openModal("postDetail",${JSON.stringify(p).replace(/'/g,"&#39;").replace(/\n/g,' ')})'>View</button>
+          <button class="btn btn-danger btn-sm" onclick="deletePost('${p.id}')">Delete</button>
+        </div>
+      </td>
+    </tr>`).join('')
+}
+
+// ========================================================
+// RENDER — HUB POSTS
+// ========================================================
+function renderHubPosts() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  pc.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+      <div>
+        <div style="font-size:14px;color:var(--text3)">Posts published here appear on <strong>every university's</strong> Yard feed</div>
+      </div>
+      <button class="btn btn-primary btn-lg" onclick="openModal('hubPost')">📢 Create Hub Post</button>
+    </div>
+    ${!state.hubPosts.length ? `<div class="empty"><div class="empty-icon">📢</div><div class="empty-title">No hub posts yet</div><div class="empty-sub">Create your first campus-wide announcement</div></div>` :
+    state.hubPosts.map(p => `
+      <div class="card" style="margin-bottom:12px;border-left:3px solid var(--brand)">
+        <div style="padding:18px 20px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+            <span class="badge badge-hub" style="font-size:12px">⚡ Hub Services</span>
+            ${p.hub_polls?.length ? '<span class="badge badge-admin" style="font-size:11px">🗳 Poll</span>' : ''}
+            <span style="font-size:12px;color:var(--text3);margin-left:auto">${fmtDate(p.created_at)}</span>
+          </div>
+          <div style="font-size:14.5px;line-height:1.6;color:var(--text);margin-bottom:12px">${p.content||''}</div>
+          ${p.hub_polls?.length ? `
+            <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:12px">
+              ${p.hub_polls[0].options?.map(opt => `
+                <div style="padding:11px 14px;border-bottom:1px solid var(--border);font-size:13.5px;font-weight:500">
+                  ${opt.label} <span class="btn-vote" style="float:right;font-size:12px;color:var(--brand)">Cast Voice</span>
+                </div>`).join('')}
+              <div style="padding:8px 14px;font-size:12px;color:var(--text3)">
+                Ends ${p.hub_polls[0].ends_at ? fmtDate(p.hub_polls[0].ends_at) : 'N/A'}
+              </div>
+            </div>` : ''}
+          <div style="display:flex;align-items:center;gap:16px">
+            <span style="font-size:13px;color:var(--text3)">❤️ ${p.like_count||0} · 💬 ${p.comment_count||0} · 👁 ${p.view_count||0}</span>
+            <button class="btn btn-danger btn-sm" style="margin-left:auto" onclick="deleteHubPost('${p.id}')">🗑 Delete</button>
+          </div>
+        </div>
+      </div>`).join('')}`
+}
+
+// ========================================================
+// RENDER — LISTINGS
+// ========================================================
+async function loadListings() {
+  const { data } = await db.from('listings').select('*, profiles(username, full_name), universities(name)').order('created_at', { ascending: false }).limit(100)
+  state.listings = data || []
+  renderListings()
+}
+
+function renderListings() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  if (!state.listings.length) { pc.innerHTML = '<div class="empty"><div class="empty-icon">🛍</div><div class="empty-title">No listings yet</div></div>'; return }
+  pc.innerHTML = `
+    <div class="card">
+      <div class="card-header"><span class="card-title">All Listings</span><span class="card-count">${state.listings.length}</span></div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Seller</th><th>Title</th><th>Type</th><th>Price</th><th>Campus</th><th>Date</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${state.listings.map(l => `<tr>
+              <td><div class="user-cell">
+                <div class="user-avatar" style="width:28px;height:28px;font-size:11px">${initials(l.profiles?.full_name||l.profiles?.username)}</div>
+                <span style="font-size:13px">@${l.profiles?.username||'?'}</span>
+              </div></td>
+              <td style="font-weight:600;font-size:13px;max-width:200px">${l.title}</td>
+              <td><span class="badge ${l.listing_type==='service'?'badge-hub':'badge-post'}">${l.listing_type}</span></td>
+              <td style="font-weight:600;color:var(--brand);font-size:13px">${l.price ? '₦'+Number(l.price).toLocaleString() : '—'}</td>
+              <td style="font-size:12px;color:var(--text3)">${l.universities?.name||'—'}</td>
+              <td style="font-size:12px;color:var(--text3)">${fmtDate(l.created_at)}</td>
+              <td><button class="btn btn-danger btn-sm" onclick="removeListing('${l.id}')">Remove</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+
+async function removeListing(id) {
+  if (!confirmAction('Remove this listing?')) return
+  await db.from('listings').update({ is_available: false }).eq('id', id)
+  toast('Listing removed', 'success')
+  loadListings()
+}
+
+// ========================================================
+// RENDER — ORDERS
+// ========================================================
+function renderOrders() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  if (!state.orders.length) { pc.innerHTML = '<div class="empty"><div class="empty-icon">📦</div><div class="empty-title">No orders yet</div></div>'; return }
+  pc.innerHTML = `
+    <div class="card">
+      <div class="card-header"><span class="card-title">All Orders</span><span class="card-count">${state.orders.length}</span></div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Item</th><th>Buyer → Seller</th><th>Amount</th><th>Qty</th><th>Status</th><th>Date</th><th>Update</th></tr></thead>
+          <tbody>
+            ${state.orders.map(o => `<tr>
+              <td style="font-weight:600;font-size:13px;max-width:180px">${o.listings?.title||'—'}</td>
+              <td style="font-size:12px;color:var(--text2)">@${o.buyer?.username||'?'} → @${o.seller?.username||'?'}</td>
+              <td style="font-weight:700;color:var(--brand)">₦${Number(o.total_price||0).toLocaleString()}</td>
+              <td style="font-size:13px">${o.quantity}</td>
+              <td><span class="badge ${o.status==='delivered'?'badge-verified':o.status==='cancelled'?'badge-banned':o.status==='confirmed'?'badge-hub':'badge-restricted'}">${o.status}</span></td>
+              <td style="font-size:12px;color:var(--text3)">${fmtDate(o.created_at)}</td>
+              <td>
+                <select class="filter-select" style="font-size:12px;padding:4px 8px" onchange="updateOrderStatus('${o.id}',this.value)">
+                  ${['pending','confirmed','delivered','cancelled'].map(s=>`<option value="${s}" ${o.status===s?'selected':''}>${s}</option>`).join('')}
+                </select>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+
+// ========================================================
+// RENDER — UNIVERSITIES
+// ========================================================
+async function loadUniversities() {
+  const { data } = await db.from('universities').select('*').order('name')
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  pc.innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:16px">
+      <button class="btn btn-primary" onclick="openAddUniModal()">+ Add University</button>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Universities</span><span class="card-count">${data?.length||0}</span></div>
+      <table>
+        <thead><tr><th>Name</th><th>Slug</th><th>Created</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${(data||[]).map(u => `<tr>
+            <td style="font-weight:600">${u.name}</td>
+            <td><span class="badge badge-post">${u.slug}</span></td>
+            <td style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
+            <td><button class="btn btn-danger btn-sm" onclick="deleteUni('${u.id}','${u.name}')">Remove</button></td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`
+}
+
+function openAddUniModal() {
+  let el = document.getElementById('modal-root')
+  if (!el) { el = document.createElement('div'); el.id = 'modal-root'; document.body.appendChild(el) }
+  el.innerHTML = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal" style="max-width:400px">
+      <div class="modal-header"><span class="modal-title">Add University</span><button class="modal-close" onclick="closeModal()">✕</button></div>
+      <div class="modal-body">
+        <div class="form-group"><label class="form-label">University Name</label><input class="form-input" id="uni-name" placeholder="e.g. University of Ibadan"></div>
+        <div class="form-group"><label class="form-label">Slug (short code)</label><input class="form-input" id="uni-slug" placeholder="e.g. ui"><div class="form-hint">Lowercase, no spaces</div></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="addUni()">Add University</button>
+      </div>
+    </div>
+  </div>`
+}
+
+async function addUni() {
+  const name = document.getElementById('uni-name')?.value.trim()
+  const slug = document.getElementById('uni-slug')?.value.trim().toLowerCase()
+  if (!name || !slug) { toast('Fill in all fields', 'error'); return }
+  const { error } = await db.from('universities').insert({ name, slug })
+  if (error) { toast('Failed: ' + error.message, 'error'); return }
+  toast('University added!', 'success')
+  closeModal(); loadUniversities()
+}
+
+async function deleteUni(id, name) {
+  if (!confirmAction(`Remove ${name}? Students of this university will lose their feed access.`)) return
+  await db.from('universities').delete().eq('id', id)
+  toast('University removed', 'success')
+  loadUniversities()
+}
+
+// ========================================================
+// DEBOUNCE
+// ========================================================
+let debounceTimers = {}
+function debounceLoad(type) {
+  clearTimeout(debounceTimers[type])
+  debounceTimers[type] = setTimeout(() => {
+    if (type === 'users') loadUsers()
+    if (type === 'posts') loadPosts()
+  }, 350)
+}
+
+// ========================================================
+// INIT
+// ========================================================
+checkAuth()
+</script>
 </body>
 </html>
