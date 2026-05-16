@@ -460,6 +460,16 @@ function numFmt(n) {
   return String(n)
 }
 
+// Black hub tick — official account badge (like Meta verified)
+function hubTickSVG() {
+  return `<span style="display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;background:#111;border-radius:50%;margin-left:4px;vertical-align:middle;flex-shrink:0" title="Hub Official Account"><svg width="9" height="9" viewBox="0 0 10 10" fill="none"><polyline points="2,5.5 4.2,7.5 8,3" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`
+}
+
+// Blue verify tick — for verified regular users
+function verifyTickSVG() {
+  return `<span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;background:#3B82F6;border-radius:50%;margin-left:4px;vertical-align:middle;flex-shrink:0" title="Verified"><svg width="8" height="8" viewBox="0 0 10 10" fill="none"><polyline points="2,5.5 4.2,7.5 8,3" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`
+}
+
 function confirmAction(msg) {
   return window.confirm(msg)
 }
@@ -593,11 +603,11 @@ async function loadUsers() {
   if (state.userSearch) q = q.or(`username.ilike.%${state.userSearch}%,full_name.ilike.%${state.userSearch}%`)
   if (state.userFilter === 'admin') q = q.eq('is_admin', true)
   if (state.userFilter === 'verified') q = q.eq('is_verified', true)
-  if (state.userFilter === 'hub') q = q.eq('is_hub_account', true)
   if (state.userFilter === 'restricted') q = q.eq('is_restricted', true)
   if (state.userFilter === 'banned') q = q.eq('is_banned', true)
+  if (state.userFilter === 'hub') q = q.eq('is_hub', true)
   const { data, count, error } = await q
-  if (error) { toast('Users load error: ' + error.message, 'error') }
+  if (error) { toast('Users load failed: ' + error.message, 'error'); console.error('loadUsers', error) }
   state.users = data || []
   state.usersTotal = count || 0
   renderUsers()
@@ -605,14 +615,14 @@ async function loadUsers() {
 
 async function loadPosts() {
   let q = db.from('posts')
-    .select('*, profiles(username, full_name, is_verified, is_hub_account), universities(name)', { count: 'exact' })
+    .select('*, profiles(username, full_name, is_verified, is_hub), universities(name)', { count: 'exact' })
     .order('created_at', { ascending: false })
     .limit(100)
   if (state.postFilter === 'hub') q = q.eq('is_hub_service', true)
   if (state.postFilter === 'flagged') q = q.eq('is_flagged', true)
   if (state.postSearch) q = q.ilike('content', `%${state.postSearch}%`)
   const { data, count, error } = await q
-  if (error) { toast('Posts load error: ' + error.message, 'error') }
+  if (error) { toast('Posts load failed: ' + error.message, 'error'); console.error('loadPosts', error) }
   state.posts = data || []
   state.postsTotal = count || 0
   renderPosts()
@@ -643,33 +653,28 @@ async function loadOrders() {
 async function deletePost(postId) {
   if (!confirmAction('Permanently delete this post? This cannot be undone.')) return
   const { error } = await db.from('posts').delete().eq('id', postId)
-  if (error) { toast('Failed: ' + error.message, 'error'); return }
+  if (error) { toast('Delete failed: ' + error.message, 'error'); console.error('deletePost', error); return }
   toast('Post deleted', 'success')
   loadPosts(); loadStats()
 }
 
 async function toggleVerified(userId, current) {
-  // Grant or remove the blue verified tick. Hub accounts get a black tick (is_hub_account).
   const { error } = await db.from('profiles').update({ is_verified: !current }).eq('id', userId)
-  if (error) {
-    toast('Failed: ' + error.message + ' — ensure you ran the migration SQL', 'error')
-    return
-  }
-  toast(current ? 'Verification removed' : '✓ User verified', 'success')
+  if (error) { toast('Verify failed: ' + error.message, 'error'); console.error('toggleVerified', error); return }
+  toast(current ? 'Verification removed' : '✓ User verified — blue tick added', 'success')
   loadUsers(); loadStats()
 }
 
-async function toggleHubAccount(userId, current) {
-  // Hub accounts get a black ✓ tick (like Facebook/Twitter verified pages)
-  const { error } = await db.from('profiles').update({ is_hub_account: !current, is_verified: !current }).eq('id', userId)
-  if (error) { toast('Failed: ' + error.message, 'error'); return }
-  toast(current ? 'Hub status removed' : '🖤 Hub account badge granted', 'success')
-  loadUsers(); loadStats()
+async function toggleHub(userId, current) {
+  const { error } = await db.from('profiles').update({ is_hub: !current }).eq('id', userId)
+  if (error) { toast('Hub failed: ' + error.message, 'error'); console.error('toggleHub', error); return }
+  toast(current ? 'Hub status removed' : '⚫ Hub black tick granted', 'success')
+  loadUsers()
 }
 
 async function toggleRestricted(userId, current) {
   const { error } = await db.from('profiles').update({ is_restricted: !current }).eq('id', userId)
-  if (error) { toast('Failed', 'error'); return }
+  if (error) { toast('Restrict failed: ' + error.message, 'error'); console.error('toggleRestricted', error); return }
   toast(current ? 'Restriction lifted' : '⚠️ Account restricted', 'success')
   loadUsers(); loadStats()
 }
@@ -677,14 +682,14 @@ async function toggleRestricted(userId, current) {
 async function toggleBanned(userId, current) {
   if (!current && !confirmAction('Ban this user? They will not be able to log in.')) return
   const { error } = await db.from('profiles').update({ is_banned: !current }).eq('id', userId)
-  if (error) { toast('Failed', 'error'); return }
+  if (error) { toast('Ban failed: ' + error.message, 'error'); console.error('toggleBanned', error); return }
   toast(current ? 'User unbanned' : '🚫 User banned', current ? 'info' : 'error')
   loadUsers(); loadStats()
 }
 
 async function toggleAdmin(userId, current) {
   const { error } = await db.from('profiles').update({ is_admin: !current }).eq('id', userId)
-  if (error) { toast('Failed', 'error'); return }
+  if (error) { toast('Admin toggle failed: ' + error.message, 'error'); console.error('toggleAdmin', error); return }
   toast(current ? 'Admin revoked' : '👑 Admin granted', 'success')
   loadUsers()
 }
@@ -692,7 +697,7 @@ async function toggleAdmin(userId, current) {
 async function deleteUser(userId) {
   if (!confirmAction('Delete this account permanently? All posts and data will be removed.')) return
   const { error } = await db.from('profiles').delete().eq('id', userId)
-  if (error) { toast('Failed: ' + error.message, 'error'); return }
+  if (error) { toast('Delete failed: ' + error.message, 'error'); console.error('deleteUser', error); return }
   toast('Account deleted', 'success')
   loadUsers(); loadStats()
 }
@@ -706,12 +711,13 @@ async function publishHubPost(content, pollMode, pollOptions, endsIn, mediaNote)
     post_type: pollMode ? 'poll' : 'text',
     university_id: null,
   }).select().single()
-  if (error) { toast('Failed: ' + error.message, 'error'); return false }
+  if (error) { toast('Hub post failed: ' + error.message, 'error'); console.error('publishHubPost', error); return false }
 
   if (pollMode && postData) {
     const options = pollOptions.filter(o => o.trim()).map((label, i) => ({ id: String(i), label }))
     const endsAt = new Date(Date.now() + endsIn * 3600 * 1000).toISOString()
-    await db.from('hub_polls').insert({ post_id: postData.id, question: content, options, ends_at: endsAt })
+    const { error: pollErr } = await db.from('hub_polls').insert({ post_id: postData.id, question: content, options, ends_at: endsAt })
+    if (pollErr) { toast('Poll attach failed: ' + pollErr.message, 'error'); console.error('publishHubPost poll', pollErr) }
   }
   toast('📢 Hub post published to all campuses!', 'success')
   closeModal()
@@ -721,14 +727,17 @@ async function publishHubPost(content, pollMode, pollOptions, endsIn, mediaNote)
 
 async function deleteHubPost(postId) {
   if (!confirmAction('Delete this hub post from all university timelines?')) return
-  await db.from('hub_polls').delete().eq('post_id', postId)
-  await db.from('posts').delete().eq('id', postId)
+  const { error: pollErr } = await db.from('hub_polls').delete().eq('post_id', postId)
+  if (pollErr) console.warn('Poll delete warning:', pollErr.message)
+  const { error } = await db.from('posts').delete().eq('id', postId)
+  if (error) { toast('Delete failed: ' + error.message, 'error'); console.error('deleteHubPost', error); return }
   toast('Hub post deleted', 'success')
-  loadHubPosts()
+  loadHubPosts(); loadStats()
 }
 
 async function updateOrderStatus(orderId, status) {
-  await db.from('orders').update({ status }).eq('id', orderId)
+  const { error } = await db.from('orders').update({ status }).eq('id', orderId)
+  if (error) { toast('Order update failed: ' + error.message, 'error'); return }
   toast('Order updated', 'success')
   loadOrders()
 }
@@ -754,6 +763,11 @@ function renderModal() {
 
   if (m.type === 'userDetail') {
     const u = m.data
+    const tickHtml = u.is_hub
+      ? `<span style="display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;background:#111;border-radius:50%;margin-left:6px;flex-shrink:0" title="Hub Official"><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><polyline points="2,5.5 4.2,7.5 8,3" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`
+      : u.is_verified
+        ? `<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;background:#3B82F6;border-radius:50%;margin-left:6px;flex-shrink:0" title="Verified"><svg width="9" height="9" viewBox="0 0 10 10" fill="none"><polyline points="2,5.5 4.2,7.5 8,3" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`
+        : ''
     html = `
     <div class="modal-bg" onclick="if(event.target===this)closeModal()">
       <div class="modal">
@@ -765,12 +779,12 @@ function renderModal() {
           <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;padding:16px;background:var(--surface2);border-radius:10px">
             <div class="user-avatar" style="width:52px;height:52px;font-size:18px">${initials(u.full_name || u.username)}</div>
             <div>
-              <div style="font-size:17px;font-weight:700">${u.full_name || u.username}
-                ${u.is_hub_account ? '<span style="display:inline-flex;align-items:center;justify-content:center;background:#111;color:#fff;border-radius:50%;width:18px;height:18px;font-size:10px;font-weight:900;margin-left:6px" title="Hub Account">✓</span>' : u.is_verified ? '<span class="badge badge-verified" style="margin-left:6px">✓ Verified</span>' : ''}
+              <div style="font-size:17px;font-weight:700;display:flex;align-items:center;flex-wrap:wrap;gap:4px">
+                ${u.full_name || u.username}${tickHtml}
                 ${u.is_admin ? '<span class="badge badge-admin" style="margin-left:4px">Admin</span>' : ''}
               </div>
               <div style="color:var(--text3);font-size:13px">@${u.username} · ${u.universities?.name || 'No university'}</div>
-              <div style="color:var(--text3);font-size:12px;margin-top:2px">${u.id}</div>
+              <div style="color:var(--text3);font-size:11px;margin-top:2px;word-break:break-all">${u.id}</div>
             </div>
           </div>
           ${u.bio ? `<div style="background:var(--bg2);padding:12px;border-radius:8px;font-size:13px;color:var(--text2);margin-bottom:16px;border:1px solid var(--border)">${u.bio}</div>` : ''}
@@ -789,19 +803,19 @@ function renderModal() {
           <div class="divider"></div>
           <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:12px">Actions</div>
           <div style="display:flex;flex-wrap:wrap;gap:8px">
-            <button class="btn btn-blue" onclick="toggleVerified('${u.id}', ${u.is_verified}); closeModal()">
-              ${u.is_verified ? '✗ Remove Verification' : '✓ Grant Verification Badge'}
+            <button class="btn btn-blue" onclick="toggleVerified('${u.id}', ${!!u.is_verified}); closeModal()">
+              ${u.is_verified ? '✗ Remove Blue Tick' : '✓ Grant Blue Tick (Verify)'}
             </button>
-            <button class="btn" style="background:rgba(0,0,0,0.4);color:#eee;border:1px solid #555" onclick="toggleHubAccount('${u.id}', ${!!u.is_hub_account}); closeModal()">
-              ${u.is_hub_account ? '✗ Remove Hub Badge' : '🖤 Grant Hub Badge (Black ✓)'}
+            <button class="btn btn-sm" style="background:${u.is_hub?'rgba(0,0,0,0.8)':'rgba(30,30,30,0.9)'};color:#eee;border:1px solid #555;padding:7px 14px;border-radius:8px;font-size:13px;font-weight:600" onclick="toggleHub('${u.id}', ${!!u.is_hub}); closeModal()">
+              ${u.is_hub ? '⚫ Remove Hub Black Tick' : '⚫ Grant Hub Black Tick'}
             </button>
-            <button class="btn btn-warn" onclick="toggleRestricted('${u.id}', ${u.is_restricted}); closeModal()">
+            <button class="btn btn-warn" onclick="toggleRestricted('${u.id}', ${!!u.is_restricted}); closeModal()">
               ${u.is_restricted ? 'Lift Restriction' : '⚠ Restrict Account'}
             </button>
-            <button class="btn btn-ghost" onclick="toggleAdmin('${u.id}', ${u.is_admin}); closeModal()">
+            <button class="btn btn-ghost" onclick="toggleAdmin('${u.id}', ${!!u.is_admin}); closeModal()">
               ${u.is_admin ? 'Revoke Admin' : '👑 Make Admin'}
             </button>
-            <button class="btn btn-danger" onclick="toggleBanned('${u.id}', ${u.is_banned}); closeModal()">
+            <button class="btn btn-danger" onclick="toggleBanned('${u.id}', ${!!u.is_banned}); closeModal()">
               ${u.is_banned ? 'Unban User' : '🚫 Ban User'}
             </button>
             <button class="btn btn-danger" onclick="deleteUser('${u.id}'); closeModal()" style="background:rgba(239,68,68,0.25)">
@@ -1252,37 +1266,42 @@ function renderUniBreakdown() {
     </div>`).join('')
 }
 
+// ========================================================
+// RENDER — USERS
+// ========================================================
 function renderUsers() {
   const pc = document.getElementById('page-content')
   if (!pc) return
-  // Always rebuild container so users always appear
-  pc.innerHTML = `
-    <div class="card">
-      <div class="card-header">
-        <span class="card-title">All Users</span>
-        <span class="card-count" id="users-count">${state.usersTotal} total</span>
-        <div class="card-actions">
-          <input class="search-box" placeholder="Search name or username..." id="user-search" value="${state.userSearch}"
-            oninput="state.userSearch=this.value;debounceLoad('users')" />
-          <select class="filter-select" id="user-filter" onchange="state.userFilter=this.value;loadUsers()">
-            <option value="all" ${state.userFilter==='all'?'selected':''}>All Users</option>
-            <option value="verified" ${state.userFilter==='verified'?'selected':''}>Verified</option>
-            <option value="hub" ${state.userFilter==='hub'?'selected':''}>Hub Accounts</option>
-            <option value="admin" ${state.userFilter==='admin'?'selected':''}>Admins</option>
-            <option value="restricted" ${state.userFilter==='restricted'?'selected':''}>Restricted</option>
-            <option value="banned" ${state.userFilter==='banned'?'selected':''}>Banned</option>
-          </select>
+  if (!document.getElementById('users-table')) {
+    pc.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">All Users</span>
+          <span class="card-count" id="users-count">${state.usersTotal} total</span>
+          <div class="card-actions">
+            <input class="search-box" placeholder="Search name or username..." id="user-search" value="${state.userSearch}"
+              oninput="state.userSearch=this.value;debounceLoad('users')" />
+            <select class="filter-select" id="user-filter" onchange="state.userFilter=this.value;loadUsers()">
+              <option value="all" ${state.userFilter==='all'?'selected':''}>All Users</option>
+              <option value="verified" ${state.userFilter==='verified'?'selected':''}>Verified ✓</option>
+              <option value="hub" ${state.userFilter==='hub'?'selected':''}>Hub Accounts ⚫</option>
+              <option value="admin" ${state.userFilter==='admin'?'selected':''}>Admins</option>
+              <option value="restricted" ${state.userFilter==='restricted'?'selected':''}>Restricted</option>
+              <option value="banned" ${state.userFilter==='banned'?'selected':''}>Banned</option>
+            </select>
+          </div>
         </div>
-      </div>
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr>
-            <th>User</th><th>University</th><th>Status</th><th>Joined</th><th>Actions</th>
-          </tr></thead>
-          <tbody id="users-table"></tbody>
-        </table>
-      </div>
-    </div>`
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr>
+              <th>User</th><th>University</th><th>Status</th><th>Joined</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="users-table"></tbody>
+          </table>
+        </div>
+      </div>`
+  }
+  document.getElementById('users-count').textContent = `${state.usersTotal} total`
   const tb = document.getElementById('users-table')
   if (!tb) return
   if (!state.users.length) { tb.innerHTML = `<tr><td colspan="5"><div class="empty"><div class="empty-icon">👥</div><div class="empty-title">No users found</div></div></td></tr>`; return }
@@ -1292,12 +1311,9 @@ function renderUsers() {
         <div class="user-cell">
           <div class="user-avatar">${initials(u.full_name || u.username)}</div>
           <div>
-            <div class="user-name">${u.full_name || u.username}
-              ${u.is_hub_account
-                ? '<span style="display:inline-flex;align-items:center;justify-content:center;background:#111;color:#fff;border-radius:50%;width:15px;height:15px;font-size:9px;font-weight:900;margin-left:4px" title="Hub Account">✓</span>'
-                : u.is_verified
-                  ? '<span style="color:var(--blue);margin-left:4px" title="Verified">✓</span>'
-                  : ''}
+            <div class="user-name" style="display:flex;align-items:center;flex-wrap:wrap;gap:2px">
+              ${u.full_name || u.username}
+              ${u.is_hub ? hubTickSVG() : (u.is_verified ? verifyTickSVG() : '')}
             </div>
             <div class="user-handle">@${u.username}</div>
           </div>
@@ -1305,21 +1321,21 @@ function renderUsers() {
       </td>
       <td style="font-size:13px;color:var(--text2)">${u.universities?.name || '—'}</td>
       <td>
-        ${u.is_banned ? '<span class="badge badge-banned">🚫 Banned</span>' :
+        ${u.is_hub ? '<span class="badge" style="background:rgba(0,0,0,0.6);color:#fff;border:1px solid #444">⚫ Hub Official</span>' :
+          u.is_banned ? '<span class="badge badge-banned">🚫 Banned</span>' :
           u.is_restricted ? '<span class="badge badge-restricted">⚠ Restricted</span>' :
           u.is_admin ? '<span class="badge badge-admin">👑 Admin</span>' :
-          u.is_hub_account ? '<span class="badge" style="background:rgba(0,0,0,0.4);color:#fff;border:1px solid #333">🖤 Hub</span>' :
           u.is_verified ? '<span class="badge badge-verified">✓ Verified</span>' :
           '<span class="badge badge-active">● Active</span>'}
       </td>
       <td style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
       <td>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <div style="display:flex;gap:5px;flex-wrap:wrap">
           <button class="btn btn-ghost btn-sm" onclick='openModal("userDetail",${JSON.stringify(u).replace(/'/g,"&#39;")})'>View</button>
-          <button class="btn btn-blue btn-sm" onclick="toggleVerified('${u.id}',${u.is_verified})">${u.is_verified?'Unverify':'Verify ✓'}</button>
-          <button class="btn btn-sm" style="background:rgba(0,0,0,0.35);color:#ddd;border:1px solid #444" onclick="toggleHubAccount('${u.id}',${!!u.is_hub_account})">${u.is_hub_account?'Remove Hub':'🖤 Hub Badge'}</button>
-          <button class="btn btn-warn btn-sm" onclick="toggleRestricted('${u.id}',${u.is_restricted})">${u.is_restricted?'Unrestrict':'Restrict'}</button>
-          <button class="btn btn-danger btn-sm" onclick="toggleBanned('${u.id}',${u.is_banned})">${u.is_banned?'Unban':'Ban'}</button>
+          <button class="btn btn-blue btn-sm" onclick="toggleVerified('${u.id}',${!!u.is_verified})">${u.is_verified?'Unverify':'Verify ✓'}</button>
+          <button class="btn btn-sm" style="background:${u.is_hub?'rgba(0,0,0,0.7)':'rgba(40,40,40,0.8)'};color:#ddd;border:1px solid #555" onclick="toggleHub('${u.id}',${!!u.is_hub})">${u.is_hub?'Remove ⚫':'Hub ⚫'}</button>
+          <button class="btn btn-warn btn-sm" onclick="toggleRestricted('${u.id}',${!!u.is_restricted})">${u.is_restricted?'Unrestrict':'Restrict'}</button>
+          <button class="btn btn-danger btn-sm" onclick="toggleBanned('${u.id}',${!!u.is_banned})">${u.is_banned?'Unban':'Ban'}</button>
         </div>
       </td>
     </tr>`).join('')
@@ -1331,31 +1347,33 @@ function renderUsers() {
 function renderPosts() {
   const pc = document.getElementById('page-content')
   if (!pc) return
-  // Always rebuild the container so posts always appear fresh
-  pc.innerHTML = `
-    <div class="card">
-      <div class="card-header">
-        <span class="card-title">All Posts</span>
-        <span class="card-count" id="posts-count">${state.postsTotal}</span>
-        <div class="card-actions">
-          <input class="search-box" placeholder="Search content..." id="post-search" value="${state.postSearch}"
-            oninput="state.postSearch=this.value;debounceLoad('posts')" />
-          <select class="filter-select" onchange="state.postFilter=this.value;loadPosts()">
-            <option value="all" ${state.postFilter==='all'?'selected':''}>All Posts</option>
-            <option value="hub" ${state.postFilter==='hub'?'selected':''}>Hub Posts</option>
-            <option value="flagged" ${state.postFilter==='flagged'?'selected':''}>Flagged</option>
-          </select>
+  if (!document.getElementById('posts-table')) {
+    pc.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">All Posts</span>
+          <span class="card-count" id="posts-count">${state.postsTotal}</span>
+          <div class="card-actions">
+            <input class="search-box" placeholder="Search content..." id="post-search" value="${state.postSearch}"
+              oninput="state.postSearch=this.value;debounceLoad('posts')" />
+            <select class="filter-select" onchange="state.postFilter=this.value;loadPosts()">
+              <option value="all">All Posts</option>
+              <option value="hub">Hub Posts</option>
+              <option value="flagged">Flagged</option>
+            </select>
+          </div>
         </div>
-      </div>
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr>
-            <th>Author</th><th>Content</th><th>Campus</th><th>Stats</th><th>Date</th><th>Actions</th>
-          </tr></thead>
-          <tbody id="posts-table"></tbody>
-        </table>
-      </div>
-    </div>`
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr>
+              <th>Author</th><th>Content</th><th>Campus</th><th>Stats</th><th>Date</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="posts-table"></tbody>
+          </table>
+        </div>
+      </div>`
+  }
+  document.getElementById('posts-count').textContent = state.postsTotal
   const tb = document.getElementById('posts-table')
   if (!tb) return
   if (!state.posts.length) { tb.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-icon">📝</div><div class="empty-title">No posts found</div></div></td></tr>`; return }
@@ -1364,10 +1382,7 @@ function renderPosts() {
       <td>
         <div class="user-cell">
           <div class="user-avatar" style="width:28px;height:28px;font-size:11px">${initials(p.profiles?.full_name||p.profiles?.username)}</div>
-          <div>
-            <span style="font-size:13px;font-weight:600">@${p.profiles?.username||'?'}</span>
-            ${p.profiles?.is_hub_account ? '<span style="color:#000;background:#fff;border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:900;margin-left:3px" title="Hub Account">✓</span>' : p.profiles?.is_verified ? '<span style="color:var(--blue);margin-left:3px;font-size:12px" title="Verified">✓</span>' : ''}
-          </div>
+          <span style="font-size:13px;font-weight:600">@${p.profiles?.username||'?'}</span>
         </div>
       </td>
       <td style="max-width:280px">
@@ -1436,7 +1451,13 @@ function renderHubPosts() {
 // RENDER — LISTINGS
 // ========================================================
 async function loadListings() {
-  const { data } = await db.from('listings').select('*, profiles(username, full_name), universities(name)').order('created_at', { ascending: false }).limit(100)
+  // Load ALL listings (including unavailable) so admin can see everything
+  const { data, error } = await db
+    .from('listings')
+    .select('*, profiles(username, full_name), universities(name)', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .limit(200)
+  if (error) { toast('Listings load failed: ' + error.message, 'error'); console.error('loadListings', error) }
   state.listings = data || []
   renderListings()
 }
@@ -1444,37 +1465,81 @@ async function loadListings() {
 function renderListings() {
   const pc = document.getElementById('page-content')
   if (!pc) return
-  if (!state.listings.length) { pc.innerHTML = '<div class="empty"><div class="empty-icon">🛍</div><div class="empty-title">No listings yet</div></div>'; return }
+  if (!state.listings.length) {
+    pc.innerHTML = '<div class="empty"><div class="empty-icon">🛍</div><div class="empty-title">No listings yet</div><div class="empty-sub">Listings created on the app will appear here</div></div>'
+    return
+  }
   pc.innerHTML = `
     <div class="card">
-      <div class="card-header"><span class="card-title">All Listings</span><span class="card-count">${state.listings.length}</span></div>
+      <div class="card-header">
+        <span class="card-title">All Listings</span>
+        <span class="card-count">${state.listings.length}</span>
+        <div class="card-actions">
+          <input class="search-box" placeholder="Search listings..." id="listing-search"
+            oninput="filterListings(this.value)" />
+        </div>
+      </div>
       <div style="overflow-x:auto">
         <table>
-          <thead><tr><th>Seller</th><th>Title</th><th>Type</th><th>Price</th><th>Campus</th><th>Date</th><th>Actions</th></tr></thead>
-          <tbody>
-            ${state.listings.map(l => `<tr>
-              <td><div class="user-cell">
-                <div class="user-avatar" style="width:28px;height:28px;font-size:11px">${initials(l.profiles?.full_name||l.profiles?.username)}</div>
-                <span style="font-size:13px">@${l.profiles?.username||'?'}</span>
-              </div></td>
-              <td style="font-weight:600;font-size:13px;max-width:200px">${l.title}</td>
-              <td><span class="badge ${l.listing_type==='service'?'badge-hub':'badge-post'}">${l.listing_type}</span></td>
-              <td style="font-weight:600;color:var(--brand);font-size:13px">${l.price ? '₦'+Number(l.price).toLocaleString() : '—'}</td>
-              <td style="font-size:12px;color:var(--text3)">${l.universities?.name||'—'}</td>
-              <td style="font-size:12px;color:var(--text3)">${fmtDate(l.created_at)}</td>
-              <td><button class="btn btn-danger btn-sm" onclick="removeListing('${l.id}')">Remove</button></td>
-            </tr>`).join('')}
+          <thead><tr><th>Seller</th><th>Title</th><th>Type</th><th>Price</th><th>Status</th><th>Campus</th><th>Date</th><th>Actions</th></tr></thead>
+          <tbody id="listings-tbody">
+            ${state.listings.map(l => listingRow(l)).join('')}
           </tbody>
         </table>
       </div>
     </div>`
 }
 
+function listingRow(l) {
+  const available = l.is_available !== false
+  return `<tr style="opacity:${available?1:0.55}">
+    <td><div class="user-cell">
+      <div class="user-avatar" style="width:28px;height:28px;font-size:11px">${initials(l.profiles?.full_name||l.profiles?.username)}</div>
+      <span style="font-size:13px">@${l.profiles?.username||'?'}</span>
+    </div></td>
+    <td style="font-weight:600;font-size:13px;max-width:200px">${l.title||'—'}</td>
+    <td><span class="badge ${l.listing_type==='service'?'badge-hub':'badge-post'}">${l.listing_type||'—'}</span></td>
+    <td style="font-weight:600;color:var(--brand);font-size:13px">${l.price ? '₦'+Number(l.price).toLocaleString() : '—'}</td>
+    <td><span class="badge ${available?'badge-active':'badge-banned'}">${available?'Active':'Removed'}</span></td>
+    <td style="font-size:12px;color:var(--text3)">${l.universities?.name||'—'}</td>
+    <td style="font-size:12px;color:var(--text3)">${fmtDate(l.created_at)}</td>
+    <td><div style="display:flex;gap:6px">
+      ${available
+        ? `<button class="btn btn-warn btn-sm" onclick="removeListing('${l.id}')">Remove</button>`
+        : `<button class="btn btn-success btn-sm" onclick="restoreListing('${l.id}')">Restore</button>`}
+      <button class="btn btn-danger btn-sm" onclick="hardDeleteListing('${l.id}')">Delete</button>
+    </div></td>
+  </tr>`
+}
+
+function filterListings(q) {
+  const rows = document.querySelectorAll('#listings-tbody tr')
+  rows.forEach(row => {
+    row.style.display = row.textContent.toLowerCase().includes(q.toLowerCase()) ? '' : 'none'
+  })
+}
+
 async function removeListing(id) {
-  if (!confirmAction('Remove this listing?')) return
-  await db.from('listings').update({ is_available: false }).eq('id', id)
-  toast('Listing removed', 'success')
+  if (!confirmAction('Remove this listing? It will be hidden from students.')) return
+  const { error } = await db.from('listings').update({ is_available: false }).eq('id', id)
+  if (error) { toast('Remove failed: ' + error.message, 'error'); console.error('removeListing', error); return }
+  toast('Listing removed from marketplace', 'success')
   loadListings()
+}
+
+async function restoreListing(id) {
+  const { error } = await db.from('listings').update({ is_available: true }).eq('id', id)
+  if (error) { toast('Restore failed: ' + error.message, 'error'); return }
+  toast('Listing restored', 'success')
+  loadListings()
+}
+
+async function hardDeleteListing(id) {
+  if (!confirmAction('Permanently delete this listing? This cannot be undone.')) return
+  const { error } = await db.from('listings').delete().eq('id', id)
+  if (error) { toast('Delete failed: ' + error.message, 'error'); console.error('hardDeleteListing', error); return }
+  toast('Listing permanently deleted', 'success')
+  loadListings(); loadStats()
 }
 
 // ========================================================
@@ -1514,26 +1579,32 @@ function renderOrders() {
 // RENDER — UNIVERSITIES
 // ========================================================
 async function loadUniversities() {
-  const { data } = await db.from('universities').select('*').order('name')
+  const { data, error } = await db.from('universities').select('*').order('name')
+  if (error) { toast('Universities load failed: ' + error.message, 'error'); console.error('loadUniversities', error) }
   const pc = document.getElementById('page-content')
   if (!pc) return
   pc.innerHTML = `
     <div style="display:flex;justify-content:flex-end;margin-bottom:16px">
-      <button class="btn btn-primary" onclick="openAddUniModal()">+ Add University</button>
+      <button class="btn btn-primary btn-lg" onclick="openAddUniModal()">+ Add University</button>
     </div>
     <div class="card">
-      <div class="card-header"><span class="card-title">Universities</span><span class="card-count">${data?.length||0}</span></div>
-      <table>
+      <div class="card-header">
+        <span class="card-title">Universities</span>
+        <span class="card-count">${data?.length||0} campuses</span>
+      </div>
+      ${!data?.length
+        ? '<div class="empty"><div class="empty-icon">🎓</div><div class="empty-title">No universities yet</div></div>'
+        : `<table>
         <thead><tr><th>Name</th><th>Slug</th><th>Created</th><th>Actions</th></tr></thead>
         <tbody>
-          ${(data||[]).map(u => `<tr>
+          ${data.map(u => `<tr>
             <td style="font-weight:600">${u.name}</td>
             <td><span class="badge badge-post">${u.slug}</span></td>
             <td style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
-            <td><button class="btn btn-danger btn-sm" onclick="deleteUni('${u.id}','${u.name}')">Remove</button></td>
+            <td><button class="btn btn-danger btn-sm" onclick="deleteUni('${u.id}','${u.name.replace(/'/g,'')}')">Remove</button></td>
           </tr>`).join('')}
         </tbody>
-      </table>
+      </table>`}
     </div>`
 }
 
@@ -1543,14 +1614,26 @@ function openAddUniModal() {
   el.innerHTML = `
   <div class="modal-bg" onclick="if(event.target===this)closeModal()">
     <div class="modal" style="max-width:400px">
-      <div class="modal-header"><span class="modal-title">Add University</span><button class="modal-close" onclick="closeModal()">✕</button></div>
+      <div class="modal-header">
+        <span class="modal-title">Add University</span>
+        <button class="modal-close" onclick="closeModal()">✕</button>
+      </div>
       <div class="modal-body">
-        <div class="form-group"><label class="form-label">University Name</label><input class="form-input" id="uni-name" placeholder="e.g. University of Ibadan"></div>
-        <div class="form-group"><label class="form-label">Slug (short code)</label><input class="form-input" id="uni-slug" placeholder="e.g. ui"><div class="form-hint">Lowercase, no spaces</div></div>
+        <div class="form-group">
+          <label class="form-label">University Name</label>
+          <input class="form-input" id="uni-name" placeholder="e.g. University of Lagos">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Slug (short code)</label>
+          <input class="form-input" id="uni-slug" placeholder="e.g. unilag"
+            oninput="this.value=this.value.toLowerCase().replace(/[^a-z0-9-]/g,'')">
+          <div class="form-hint">Lowercase letters, numbers and hyphens only</div>
+        </div>
+        <div id="uni-add-err"></div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="addUni()">Add University</button>
+        <button class="btn btn-primary" id="uni-add-btn" onclick="addUni()">Add University</button>
       </div>
     </div>
   </div>`
@@ -1559,16 +1642,25 @@ function openAddUniModal() {
 async function addUni() {
   const name = document.getElementById('uni-name')?.value.trim()
   const slug = document.getElementById('uni-slug')?.value.trim().toLowerCase()
-  if (!name || !slug) { toast('Fill in all fields', 'error'); return }
+  const errEl = document.getElementById('uni-add-err')
+  const btn = document.getElementById('uni-add-btn')
+  if (!name || !slug) { if(errEl) errEl.innerHTML='<div class="auth-err">Fill in both fields</div>'; return }
+  if (btn) { btn.disabled = true; btn.textContent = 'Adding...' }
   const { error } = await db.from('universities').insert({ name, slug })
-  if (error) { toast('Failed: ' + error.message, 'error'); return }
-  toast('University added!', 'success')
+  if (error) {
+    if(errEl) errEl.innerHTML = `<div class="auth-err">Failed: ${error.message}</div>`
+    if (btn) { btn.disabled = false; btn.textContent = 'Add University' }
+    console.error('addUni', error)
+    return
+  }
+  toast('🎓 University added!', 'success')
   closeModal(); loadUniversities()
 }
 
 async function deleteUni(id, name) {
-  if (!confirmAction(`Remove ${name}? Students of this university will lose their feed access.`)) return
-  await db.from('universities').delete().eq('id', id)
+  if (!confirmAction(`Remove "${name}"? Students of this university will lose their feed access.`)) return
+  const { error } = await db.from('universities').delete().eq('id', id)
+  if (error) { toast('Delete failed: ' + error.message, 'error'); console.error('deleteUni', error); return }
   toast('University removed', 'success')
   loadUniversities()
 }
