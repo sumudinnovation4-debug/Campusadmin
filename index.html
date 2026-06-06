@@ -1009,6 +1009,12 @@ function renderApp() {
       ${navItem('orders','📦','Orders')}
     </div>
     <div class="sidebar-section">
+      <div class="sidebar-section-label">Ambassadors</div>
+      ${navItem('ambassadors','🏅','Ambassadors')}
+      ${navItem('amb-referrals','👥','Referrals')}
+      ${navItem('amb-payouts','💰','Payouts')}
+    </div>
+    <div class="sidebar-section">
       <div class="sidebar-section-label">Settings</div>
       ${navItem('universities','🎓','Universities')}
     </div>
@@ -1062,6 +1068,9 @@ function navigateTo(page) {
     listings: ['Marketplace', 'Products and services listed'],
     orders: ['Orders', 'Track and manage orders'],
     universities: ['Universities', 'Manage campuses'],
+    ambassadors: ['Ambassadors', 'Manage campus ambassadors'],
+    'amb-referrals': ['Ambassador Referrals', 'All referrals across ambassadors'],
+    'amb-payouts': ['Ambassador Payouts', 'Manage payout requests'],
   }
   const [title, sub] = titles[page] || [page, '']
   document.getElementById('topbar-title').textContent = title
@@ -1077,6 +1086,9 @@ function navigateTo(page) {
   else if (page === 'listings') { loadListings(); }
   else if (page === 'orders') { loadOrders(); }
   else if (page === 'universities') { loadUniversities(); }
+  else if (page === 'ambassadors') { loadAmbassadors(); }
+  else if (page === 'amb-referrals') { loadAmbReferrals(); }
+  else if (page === 'amb-payouts') { loadAmbPayouts(); }
 }
 
 // ========================================================
@@ -1575,6 +1587,329 @@ async function deleteUni(id, name) {
   await db.from('universities').delete().eq('id', id)
   toast('University removed', 'success')
   loadUniversities()
+}
+
+// ========================================================
+// AMBASSADORS MANAGEMENT
+// ========================================================
+async function loadAmbassadors() {
+  const { data } = await db.from('ambassadors').select('*').order('created_at', { ascending: false })
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  const list = data || []
+  const pending = list.filter(a => a.status === 'pending')
+  const approved = list.filter(a => a.status === 'approved')
+  pc.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="openAddAmbassadorModal()">+ Add Ambassador</button>
+        <button class="btn btn-primary" onclick="openAnnouncementModal()">📢 Send Announcement</button>
+      </div>
+    </div>
+    ${pending.length ? `
+    <div class="card" style="margin-bottom:20px;border-left:3px solid var(--accent)">
+      <div class="card-header">
+        <span class="card-title">⏳ Pending Approval</span>
+        <span class="card-count">${pending.length}</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Name / Email</th><th>School</th><th>Applied</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${pending.map(a => `<tr>
+              <td>
+                <div style="font-weight:600;font-size:13px">${a.full_name||'(no name)'}</div>
+                <div style="font-size:11px;color:var(--text3)">${a.email||''}</div>
+              </td>
+              <td style="font-size:13px;color:var(--text2)">${a.school||'—'}</td>
+              <td style="font-size:12px;color:var(--text3)">${fmtDate(a.created_at)}</td>
+              <td>
+                <div style="display:flex;gap:6px">
+                  <button class="btn btn-success btn-sm" onclick="approveAmbassador('${a.id}')">✓ Give Access</button>
+                  <button class="btn btn-danger btn-sm" onclick="rejectAmbassador('${a.id}')">✗ Reject</button>
+                </div>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>` : ''}
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">🏅 All Ambassadors</span>
+        <span class="card-count">${list.length} total</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Ambassador</th><th>School</th><th>Code</th><th>Referrals</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${list.map(a => `<tr>
+              <td>
+                <div style="font-weight:600;font-size:13px">${a.full_name||'—'}</div>
+                <div style="font-size:11px;color:var(--text3)">${a.email||''}</div>
+              </td>
+              <td style="font-size:13px;color:var(--text2)">${a.school||'—'}</td>
+              <td style="font-family:monospace;font-size:12px;color:var(--brand)">${a.referral_code||'—'}</td>
+              <td style="font-size:13px;font-weight:600">—</td>
+              <td><span class="badge ${a.status==='approved'?'badge-hub':a.status==='rejected'?'badge-banned':'badge-restricted'}">${a.status}</span>${a.is_flagged?'<span class="badge badge-banned" style="margin-left:4px">🚩 Flagged</span>':''}</td>
+              <td>
+                <div style="display:flex;gap:6px;flex-wrap:wrap">
+                  ${a.status==='pending'?`<button class="btn btn-success btn-sm" onclick="approveAmbassador('${a.id}')">✓ Approve</button>`:''}
+                  ${a.status==='approved'?`<button class="btn btn-warn btn-sm" onclick="revokeAmbassador('${a.id}')">Revoke</button>`:''}
+                  ${!a.is_flagged?`<button class="btn btn-danger btn-sm" onclick="flagAmbassador('${a.id}')">🚩 Flag</button>`:
+                    `<button class="btn btn-ghost btn-sm" onclick="unflagAmbassador('${a.id}')">Clear Flag</button>`}
+                  <button class="btn btn-ghost btn-sm" onclick="openAmbDetailModal(${JSON.stringify(a).replace(/'/g,"&#39;")})">View</button>
+                </div>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+
+async function approveAmbassador(id) {
+  const { error } = await db.from('ambassadors').update({ status: 'approved', approved_at: new Date().toISOString() }).eq('id', id)
+  if (error) { toast('Approve failed: ' + error.message, 'error'); return }
+  toast('✅ Ambassador approved — they can now log in', 'success')
+  loadAmbassadors()
+}
+async function rejectAmbassador(id) {
+  if (!confirmAction('Reject this ambassador? They will see a rejection message on login.')) return
+  const { error } = await db.from('ambassadors').update({ status: 'rejected' }).eq('id', id)
+  if (error) { toast('Failed', 'error'); return }
+  toast('Ambassador rejected', 'info')
+  loadAmbassadors()
+}
+async function revokeAmbassador(id) {
+  if (!confirmAction('Revoke access? Ambassador will be locked out.')) return
+  await db.from('ambassadors').update({ status: 'pending' }).eq('id', id)
+  toast('Access revoked', 'info')
+  loadAmbassadors()
+}
+async function flagAmbassador(id) {
+  await db.from('ambassadors').update({ is_flagged: true }).eq('id', id)
+  toast('🚩 Ambassador flagged for fraud review. Earnings frozen.', 'error')
+  loadAmbassadors()
+}
+async function unflagAmbassador(id) {
+  await db.from('ambassadors').update({ is_flagged: false }).eq('id', id)
+  toast('Flag cleared', 'success')
+  loadAmbassadors()
+}
+
+function openAddAmbassadorModal() {
+  let el = document.getElementById('modal-root')
+  if (!el) { el = document.createElement('div'); el.id = 'modal-root'; document.body.appendChild(el) }
+  el.innerHTML = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <div class="modal-header"><span class="modal-title">+ Add Ambassador</span><button class="modal-close" onclick="closeModal()">✕</button></div>
+      <div class="modal-body">
+        <div style="font-size:13px;color:var(--text2);margin-bottom:16px;background:rgba(124,58,237,0.1);border:1px solid rgba(124,58,237,0.25);padding:10px 14px;border-radius:8px">
+          The ambassador must already have a Supabase auth account. Enter their user ID or email to link them.
+        </div>
+        <div class="form-group"><label class="form-label">Full Name</label><input class="form-input" id="amb-name" placeholder="e.g. Fatima Usman"></div>
+        <div class="form-group"><label class="form-label">Email Address</label><input class="form-input" id="amb-email" placeholder="ambassador@email.com"></div>
+        <div class="form-group"><label class="form-label">Auth User ID (from Supabase)</label><input class="form-input" id="amb-uid" placeholder="uuid"></div>
+        <div class="form-group"><label class="form-label">School</label><input class="form-input" id="amb-school" placeholder="e.g. Bayero University Kano"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="createAmbassador()">Create Ambassador</button>
+      </div>
+    </div>
+  </div>`
+}
+
+async function createAmbassador() {
+  const name = document.getElementById('amb-name')?.value.trim()
+  const email = document.getElementById('amb-email')?.value.trim()
+  const uid = document.getElementById('amb-uid')?.value.trim()
+  const school = document.getElementById('amb-school')?.value.trim()
+  if (!name || !email || !uid) { toast('Fill all required fields', 'error'); return }
+  const { error } = await db.from('ambassadors').insert({
+    user_id: uid, full_name: name, email, school,
+    status: 'approved', approved_at: new Date().toISOString(),
+    created_at: new Date().toISOString()
+  })
+  if (error) { toast('Failed: ' + error.message, 'error'); return }
+  toast('✅ Ambassador created with access', 'success')
+  closeModal(); loadAmbassadors()
+}
+
+function openAmbDetailModal(a) {
+  let el = document.getElementById('modal-root')
+  if (!el) { el = document.createElement('div'); el.id = 'modal-root'; document.body.appendChild(el) }
+  el.innerHTML = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-header"><span class="modal-title">🏅 Ambassador Detail</span><button class="modal-close" onclick="closeModal()">✕</button></div>
+      <div class="modal-body">
+        <div style="background:var(--surface2);border-radius:10px;padding:16px;margin-bottom:16px">
+          <div style="font-size:18px;font-weight:800">${a.full_name||'Unknown'}</div>
+          <div style="font-size:13px;color:var(--text3);margin-top:2px">${a.email||''}</div>
+        </div>
+        <div class="form-row">
+          ${[['School',a.school],['Department',a.department],['Level',a.level],['Phone',a.phone],['WhatsApp',a.whatsapp],['Code',a.referral_code]].map(([k,v])=>`
+            <div style="background:var(--bg2);padding:12px;border-radius:8px">
+              <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px">${k}</div>
+              <div style="font-weight:600;font-size:13px">${v||'—'}</div>
+            </div>`).join('')}
+        </div>
+        <div style="margin-top:16px;padding:12px;background:var(--bg2);border-radius:8px;font-size:13px;color:var(--text2)">
+          🔗 ${a.referral_link||'Not generated yet'}
+        </div>
+      </div>
+      <div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal()">Close</button></div>
+    </div>
+  </div>`
+}
+
+function openAnnouncementModal() {
+  let el = document.getElementById('modal-root')
+  if (!el) { el = document.createElement('div'); el.id = 'modal-root'; document.body.appendChild(el) }
+  el.innerHTML = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-header"><span class="modal-title">📢 Send Announcement to Ambassadors</span><button class="modal-close" onclick="closeModal()">✕</button></div>
+      <div class="modal-body">
+        <div class="form-group"><label class="form-label">Title</label><input class="form-input" id="ann-title" placeholder="e.g. New payout policy update"></div>
+        <div class="form-group"><label class="form-label">Message</label><textarea class="form-textarea" id="ann-body" placeholder="Write your announcement…"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="sendAnnouncement()">📢 Send to All Ambassadors</button>
+      </div>
+    </div>
+  </div>`
+}
+
+async function sendAnnouncement() {
+  const title = document.getElementById('ann-title')?.value.trim()
+  const body = document.getElementById('ann-body')?.value.trim()
+  if (!title || !body) { toast('Fill all fields', 'error'); return }
+  const { error } = await db.from('ambassador_announcements').insert({ title, body, is_active: true, created_at: new Date().toISOString() })
+  if (error) { toast('Failed: ' + error.message, 'error'); return }
+  toast('📢 Announcement sent to all ambassadors!', 'success')
+  closeModal()
+}
+
+async function loadAmbReferrals() {
+  const { data } = await db.from('ambassador_referrals')
+    .select('*, ambassadors(full_name, referral_code, school)')
+    .order('created_at', { ascending: false })
+    .limit(200)
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  const refs = data || []
+  pc.innerHTML = `
+    <div style="display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap">
+      <div class="stat-card green" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">${refs.filter(r=>r.status==='verified').length}</div><div style="font-size:12px;color:var(--text2)">Total Verified</div></div>
+      <div class="stat-card amber" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">${refs.filter(r=>r.status==='pending').length}</div><div style="font-size:12px;color:var(--text2)">Pending Verification</div></div>
+      <div class="stat-card red" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">${refs.filter(r=>r.is_flagged).length}</div><div style="font-size:12px;color:var(--text2)">Flagged</div></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">All Referrals</span><span class="card-count">${refs.length}</span></div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Student</th><th>Ambassador</th><th>School</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${refs.map(r => `<tr>
+              <td>
+                <div style="font-weight:600;font-size:13px">${r.student_name||'Unknown'}</div>
+                <div style="font-size:11px;color:var(--text3)">${r.student_email||''}</div>
+              </td>
+              <td style="font-size:13px;color:var(--brand)">${r.ambassadors?.full_name||'—'} <span style="color:var(--text3);font-size:11px">${r.ambassadors?.referral_code||''}</span></td>
+              <td style="font-size:13px;color:var(--text2)">${r.student_school||'—'}</td>
+              <td style="font-size:12px;color:var(--text3)">${fmtDate(r.created_at)}</td>
+              <td><span class="badge ${r.status==='verified'?'badge-hub':r.status==='rejected'?'badge-banned':'badge-restricted'}">${r.status}</span>${r.is_flagged?'<span class="badge badge-banned" style="margin-left:4px">🚩</span>':''}</td>
+              <td>
+                <div style="display:flex;gap:6px">
+                  ${r.status==='pending'?`
+                    <button class="btn btn-success btn-sm" onclick="verifyReferral('${r.id}')">✓ Verify</button>
+                    <button class="btn btn-danger btn-sm" onclick="rejectReferral('${r.id}')">✗ Reject</button>
+                  `:''}
+                  ${!r.is_flagged?`<button class="btn btn-warn btn-sm" onclick="flagReferral('${r.id}')">🚩 Flag</button>`:''}
+                </div>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+
+async function verifyReferral(id) {
+  const { error } = await db.from('ambassador_referrals').update({ status: 'verified', verified_at: new Date().toISOString() }).eq('id', id)
+  if (error) { toast('Failed', 'error'); return }
+  toast('✅ Referral verified — earnings unlocked', 'success')
+  loadAmbReferrals()
+}
+async function rejectReferral(id) {
+  const { error } = await db.from('ambassador_referrals').update({ status: 'rejected' }).eq('id', id)
+  if (error) { toast('Failed', 'error'); return }
+  toast('Referral rejected', 'info')
+  loadAmbReferrals()
+}
+async function flagReferral(id) {
+  await db.from('ambassador_referrals').update({ is_flagged: true }).eq('id', id)
+  toast('🚩 Referral flagged for review', 'error')
+  loadAmbReferrals()
+}
+
+async function loadAmbPayouts() {
+  const { data } = await db.from('ambassador_payouts')
+    .select('*, ambassadors(full_name, referral_code)')
+    .order('created_at', { ascending: false })
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  const payouts = data || []
+  const pending = payouts.filter(p => p.status === 'pending')
+  pc.innerHTML = `
+    <div style="display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap">
+      <div class="stat-card amber" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">${pending.length}</div><div style="font-size:12px;color:var(--text2)">Pending Requests</div></div>
+      <div class="stat-card green" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">₦${Number(payouts.filter(p=>p.status==='paid').reduce((a,b)=>a+(b.amount||0),0)).toLocaleString()}</div><div style="font-size:12px;color:var(--text2)">Total Paid Out</div></div>
+      <div class="stat-card purple" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">₦${Number(pending.reduce((a,b)=>a+(b.amount||0),0)).toLocaleString()}</div><div style="font-size:12px;color:var(--text2)">Pending Amount</div></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Payout Requests</span><span class="card-count">${payouts.length}</span></div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Ambassador</th><th>Amount</th><th>Bank</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${payouts.map(p => `<tr>
+              <td style="font-weight:600;font-size:13px">${p.ambassadors?.full_name||'—'} <span style="color:var(--text3);font-size:11px">${p.ambassadors?.referral_code||''}</span></td>
+              <td style="font-weight:700;color:var(--green);font-size:14px">₦${Number(p.amount||0).toLocaleString()}</td>
+              <td style="font-size:13px;color:var(--text2)">${p.bank_name||'—'} · ${p.account_number||'—'}</td>
+              <td style="font-size:12px;color:var(--text3)">${fmtDate(p.created_at)}</td>
+              <td><span class="badge ${p.status==='paid'?'badge-hub':p.status==='rejected'?'badge-banned':'badge-restricted'}">${p.status}</span></td>
+              <td>
+                <div style="display:flex;gap:6px">
+                  ${p.status==='pending'?`
+                    <button class="btn btn-success btn-sm" onclick="approvePayout('${p.id}')">✓ Mark Paid</button>
+                    <button class="btn btn-danger btn-sm" onclick="rejectPayout('${p.id}')">✗ Reject</button>
+                  `:p.status==='paid'?'<span style="color:var(--text3);font-size:12px">Paid ✓</span>':''}
+                </div>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+
+async function approvePayout(id) {
+  const { error } = await db.from('ambassador_payouts').update({ status: 'paid', paid_at: new Date().toISOString() }).eq('id', id)
+  if (error) { toast('Failed', 'error'); return }
+  toast('✅ Payout marked as paid', 'success')
+  loadAmbPayouts()
+}
+async function rejectPayout(id) {
+  const { error } = await db.from('ambassador_payouts').update({ status: 'rejected' }).eq('id', id)
+  if (error) { toast('Failed', 'error'); return }
+  toast('Payout rejected', 'info')
+  loadAmbPayouts()
 }
 
 // ========================================================
