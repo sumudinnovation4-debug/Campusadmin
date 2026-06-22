@@ -395,18 +395,77 @@
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
     }
 
-    /* RESPONSIVE */
-    @media (max-width: 1100px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
-    @media (max-width: 900px) { .charts-grid { grid-template-columns: 1fr; } }
-    @media (max-width: 768px) {
-      .sidebar { display: none; }
-      .stats-grid { grid-template-columns: 1fr 1fr; }
+    /* ===== MOBILE NAV DRAWER ===== */
+    .mob-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      z-index: 200; backdrop-filter: blur(2px);
+    }
+    .mob-overlay.open { display: block; }
+    .hamburger {
+      display: none; width: 38px; height: 38px; border-radius: 8px;
+      background: var(--surface2); border: 1px solid var(--border);
+      align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0;
+    }
+    .hamburger span { display: block; width: 16px; height: 2px; background: var(--text2); margin: 3px auto; border-radius: 2px; }
+
+    /* ===== RESPONSIVE ===== */
+    @media (min-width: 1280px) {
+      .stats-grid { grid-template-columns: repeat(6, 1fr); }
+    }
+    @media (max-width: 1279px) and (min-width: 1024px) {
+      .stats-grid { grid-template-columns: repeat(4, 1fr); }
+    }
+    @media (max-width: 1023px) and (min-width: 768px) {
+      :root { --sidebar-w: 200px; }
+      .stats-grid { grid-template-columns: repeat(3, 1fr); }
+      .charts-grid { grid-template-columns: 1fr; }
+      .two-col { grid-template-columns: 1fr; }
+      .page { padding: 20px; }
+      .topbar { padding: 0 20px; }
+    }
+    @media (max-width: 767px) {
+      :root { --topbar-h: 56px; }
+      .sidebar {
+        position: fixed; left: 0; top: 0; bottom: 0; z-index: 300;
+        transform: translateX(-100%); transition: transform 0.25s ease;
+        width: 260px; height: 100%;
+      }
+      .sidebar.mob-open { transform: translateX(0); box-shadow: 8px 0 40px rgba(0,0,0,0.5); }
+      .hamburger { display: flex; }
+      .topbar { padding: 0 14px; gap: 10px; }
+      .topbar-title { font-size: 15px; }
+      .topbar-sub { display: none; }
+      .topbar-badge { display: none; }
+      .topbar-right { gap: 8px; }
+      .topbar-right .btn { padding: 6px 10px; font-size: 12px; }
+      .page { padding: 14px; }
+      .stats-grid { grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+      .stat-card { padding: 14px 16px; }
+      .stat-num { font-size: 24px; }
+      .stat-icon { width: 32px; height: 32px; font-size: 16px; margin-bottom: 10px; }
+      .charts-grid { grid-template-columns: 1fr; gap: 12px; margin-bottom: 16px; }
+      .chart-wrap { height: 180px; }
+      .two-col { grid-template-columns: 1fr; gap: 12px; }
+      .three-col { grid-template-columns: 1fr; gap: 10px; }
+      .card-header { padding: 12px 14px; flex-wrap: wrap; gap: 8px; }
+      .card-actions { width: 100%; display: flex; gap: 6px; }
+      .search-box { width: 100%; }
+      table th, table td { padding: 10px 12px; font-size: 12px; }
+      .page-tabs { flex-wrap: wrap; }
+      .modal { max-width: 100%; border-radius: 16px 16px 0 0; }
+      .modal-bg { align-items: flex-end; padding: 0; }
+      .form-row { grid-template-columns: 1fr; }
+      .hide-mobile { display: none !important; }
+    }
+    @media (max-width: 380px) {
+      .stats-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
 <div id="toast-container"></div>
 <div id="root"></div>
+<div class="mob-overlay" id="mob-overlay" onclick="closeMobileNav()"></div>
 
 <script>
 // ========================================================
@@ -496,17 +555,22 @@ let state = {
 // AUTH
 // ========================================================
 async function checkAuth() {
-  const { data: { session } } = await db.auth.getSession()
-  if (!session) { renderAuth(); return }
-  state.user = session.user
-  if (!ADMIN_EMAILS.includes(session.user.email)) {
-    renderAuthError('This email is not authorised to access the admin dashboard.')
-    return
+  try {
+    const { data, error } = await db.auth.getSession()
+    if (error || !data?.session) { renderAuth(); return }
+    state.user = data.session.user
+    if (!ADMIN_EMAILS.includes(state.user.email)) {
+      renderAuthError('This email is not authorised to access the admin dashboard.')
+      return
+    }
+    const { data: profile } = await db.from('profiles').select('*').eq('id', state.user.id).single()
+    state.profile = profile
+    renderApp()
+    loadAll()
+  } catch(e) {
+    console.error('Auth init error:', e)
+    renderAuth()
   }
-  const { data: profile } = await db.from('profiles').select('*').eq('id', session.user.id).single()
-  state.profile = profile
-  renderApp()
-  loadAll()
 }
 
 async function login(email, password) {
@@ -1033,6 +1097,9 @@ function renderApp() {
   </div>
   <div class="main" id="main">
     <div class="topbar" id="topbar">
+      <button class="hamburger" onclick="openMobileNav()" aria-label="Menu">
+        <span></span><span></span><span></span>
+      </button>
       <div>
         <div class="topbar-title" id="topbar-title">Overview</div>
         <div class="topbar-sub" id="topbar-sub">Welcome back, ${adminName}</div>
@@ -1049,8 +1116,19 @@ function renderApp() {
   navigateTo('overview')
 }
 
+function openMobileNav() {
+  document.querySelector('.sidebar')?.classList.add('mob-open')
+  document.getElementById('mob-overlay')?.classList.add('open')
+  document.body.style.overflow = 'hidden'
+}
+function closeMobileNav() {
+  document.querySelector('.sidebar')?.classList.remove('mob-open')
+  document.getElementById('mob-overlay')?.classList.remove('open')
+  document.body.style.overflow = ''
+}
+
 function navItem(id, icon, label) {
-  return `<button class="nav-item ${state.page===id?'active':''}" id="nav-${id}" onclick="navigateTo('${id}')">${icon} ${label}</button>`
+  return `<button class="nav-item ${state.page===id?'active':''}" id="nav-${id}" onclick="navigateTo('${id}');closeMobileNav()">${icon} ${label}</button>`
 }
 
 function navigateTo(page) {
@@ -1302,7 +1380,7 @@ function renderUsers() {
         <div style="overflow-x:auto">
           <table>
             <thead><tr>
-              <th>User</th><th>University</th><th>Status</th><th>Joined</th><th>Actions</th>
+              <th>User</th><th>University</th><th class="hide-mobile">Status</th><th class="hide-mobile">Joined</th><th>Actions</th>
             </tr></thead>
             <tbody id="users-table"></tbody>
           </table>
@@ -1325,10 +1403,10 @@ function renderUsers() {
         </div>
       </td>
       <td style="font-size:13px;color:var(--text2)">${uniName(u.university_id)}</td>
-      <td>
+      <td class="hide-mobile">
         ${u.is_hub?'<span class="badge" style="background:rgba(0,0,0,0.6);color:#fff;border:1px solid #444">⚫ Hub</span>':u.is_banned?'<span class="badge badge-banned">🚫 Banned</span>':u.is_restricted?'<span class="badge badge-restricted">⚠ Restricted</span>':u.is_admin?'<span class="badge badge-admin">👑 Admin</span>':u.is_verified?'<span class="badge badge-verified">✓ Verified</span>':'<span class="badge badge-active">● Active</span>'}
       </td>
-      <td style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
+      <td class="hide-mobile" style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
       <td>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn btn-ghost btn-sm" onclick='openModal("userDetail",${JSON.stringify(u).replace(/'/g,"&#39;")})'>View</button>
@@ -1535,7 +1613,7 @@ async function loadUniversities() {
   const pc = document.getElementById('page-content')
   if (!pc) return
   pc.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:10px">
       <div class="page-tabs">
         <button class="page-tab ${uniActiveTab==='campuses'?'active':''}" onclick="switchUniTab('campuses')">🎓 Campuses</button>
         <button class="page-tab ${uniActiveTab==='students'?'active':''}" onclick="switchUniTab('students')">👥 Students</button>
@@ -1546,11 +1624,14 @@ async function loadUniversities() {
   renderUniTab()
 }
 
-async function switchUniTab(tab) {
+function switchUniTab(tab) {
   uniActiveTab = tab
-  document.querySelectorAll('.page-tab').forEach(el => el.classList.remove('active'))
-  const tabs = document.querySelectorAll('.page-tab')
-  tabs.forEach(t => { if (t.textContent.includes(tab === 'campuses' ? 'Campuses' : 'Students')) t.classList.add('active') })
+  document.querySelectorAll('.page-tab').forEach(el => {
+    el.classList.toggle('active',
+      (tab==='campuses' && el.textContent.includes('Campuses')) ||
+      (tab==='students' && el.textContent.includes('Students'))
+    )
+  })
   const tc = document.getElementById('uni-tab-content')
   if (tc) tc.innerHTML = '<div class="loader"><div class="spinner"></div></div>'
   renderUniTab()
@@ -1562,7 +1643,6 @@ async function renderUniTab() {
 
   if (uniActiveTab === 'campuses') {
     const { data } = await db.from('universities').select('*').order('name')
-    // Enrich with student counts from uniBreakdown
     const countMap = {}
     ;(state.uniBreakdown || []).forEach(u => { countMap[u.name] = u.count })
     tc.innerHTML = `
@@ -1571,62 +1651,60 @@ async function renderUniTab() {
           <span class="card-title">All Campuses</span>
           <span class="card-count">${data?.length||0} universities</span>
         </div>
-        <table>
-          <thead><tr><th>Name</th><th>Slug</th><th>Students</th><th>Created</th><th>Actions</th></tr></thead>
-          <tbody>
-            ${(data||[]).map(u => {
-              const cnt = countMap[u.name] || 0
-              return `<tr>
-                <td style="font-weight:600">${u.name}</td>
-                <td><span class="badge badge-post">${u.slug}</span></td>
-                <td>
-                  <span style="font-weight:700;font-size:13px;color:var(--brand)">${cnt.toLocaleString()}</span>
-                  ${cnt > 0 ? `<span style="font-size:11px;color:var(--text3);margin-left:4px">students</span>` : '<span style="font-size:11px;color:var(--text3)"> —</span>'}
-                </td>
-                <td style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
-                <td><button class="btn btn-danger btn-sm" onclick="deleteUni('${u.id}','${u.name}')">Remove</button></td>
-              </tr>`
-            }).join('')}
-          </tbody>
-        </table>
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr><th>Name</th><th class="hide-mobile">Slug</th><th>Students</th><th class="hide-mobile">Created</th><th>Actions</th></tr></thead>
+            <tbody>
+              ${(data||[]).map(u => {
+                const cnt = countMap[u.name] || 0
+                const colors = ['#7C3AED','#10B981','#F59E0B','#3B82F6','#F97316']
+                const col = colors[Object.keys(countMap).indexOf(u.name) % colors.length] || '#7C3AED'
+                return `<tr>
+                  <td style="font-weight:600">${u.name}</td>
+                  <td class="hide-mobile"><span class="badge badge-post">${u.slug}</span></td>
+                  <td>
+                    <div style="display:flex;align-items:center;gap:8px">
+                      <span style="font-weight:700;font-size:14px;color:var(--brand)">${cnt.toLocaleString()}</span>
+                      ${cnt>0?`<div style="flex:1;max-width:80px;height:4px;background:var(--border);border-radius:2px"><div style="height:4px;border-radius:2px;background:${col};width:${Math.min(cnt/Math.max(...Object.values(countMap),1)*100,100)}%"></div></div>`:''}
+                    </div>
+                  </td>
+                  <td class="hide-mobile" style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
+                  <td><button class="btn btn-danger btn-sm" onclick="deleteUni('${u.id}','${u.name}')">Remove</button></td>
+                </tr>`
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
       </div>`
 
   } else {
-    // Students tab — per-school summary + full student list
+    // Students tab
     const [{ data: unis }, { data: profiles }] = await Promise.all([
       db.from('universities').select('id, name, slug').order('name'),
       db.from('profiles').select('id, full_name, username, university_id, is_verified, is_restricted, is_banned, is_hub, created_at').order('created_at', { ascending: false }).limit(500)
     ])
-
     const uList = unis || []
     const pList = profiles || []
-
-    // Build per-school map
     const schoolMap = {}
     uList.forEach(u => { schoolMap[u.id] = { ...u, students: [] } })
-    let noSchool = []
+    const noSchool = []
     pList.forEach(p => {
-      if (p.university_id && schoolMap[p.university_id]) {
-        schoolMap[p.university_id].students.push(p)
-      } else {
-        noSchool.push(p)
-      }
+      if (p.university_id && schoolMap[p.university_id]) schoolMap[p.university_id].students.push(p)
+      else noSchool.push(p)
     })
-
-    const sorted = Object.values(schoolMap).sort((a, b) => b.students.length - a.students.length)
+    const sorted = Object.values(schoolMap).sort((a,b) => b.students.length - a.students.length)
     const total = pList.length
+    const colors = ['#7C3AED','#10B981','#F59E0B','#3B82F6','#F97316','#EF4444','#A855F7','#06B6D4']
 
-    // Summary cards
     const summaryCards = sorted.map((s, i) => {
       const pct = total > 0 ? Math.round(s.students.length / total * 100) : 0
-      const colors = ['#7C3AED','#10B981','#F59E0B','#3B82F6','#F97316','#EF4444','#A855F7','#06B6D4']
       const col = colors[i % colors.length]
       return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;display:flex;align-items:center;gap:14px">
-        <div style="width:42px;height:42px;border-radius:10px;background:${col}22;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">🎓</div>
+        <div style="width:40px;height:40px;border-radius:10px;background:${col}22;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">🎓</div>
         <div style="flex:1;min-width:0">
-          <div style="font-weight:700;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.name}</div>
-          <div style="font-size:11px;color:var(--text3);margin-top:2px">${pct}% of total students</div>
-          <div style="height:4px;background:var(--border);border-radius:2px;margin-top:7px">
+          <div style="font-weight:700;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.name}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">${pct}% of students</div>
+          <div style="height:4px;background:var(--border);border-radius:2px;margin-top:6px">
             <div style="height:4px;border-radius:2px;background:${col};width:${pct}%"></div>
           </div>
         </div>
@@ -1637,49 +1715,24 @@ async function renderUniTab() {
       </div>`
     }).join('')
 
-    // Per-school filter
-    const filterOpts = `<option value="all">All Schools</option>
+    const filterOpts = `<option value="all">All Schools (${pList.length})</option>
       ${sorted.map(s => `<option value="${s.id}">${s.name} (${s.students.length})</option>`).join('')}
-      ${noSchool.length ? `<option value="none">No School Assigned (${noSchool.length})</option>` : ''}`
+      ${noSchool.length ? `<option value="none">Unassigned (${noSchool.length})</option>` : ''}`
 
-    // Student rows
-    const allRows = (filterVal) => {
-      let list = filterVal === 'all' ? pList
-        : filterVal === 'none' ? noSchool
-        : (schoolMap[filterVal]?.students || [])
-      return list.map(u => `<tr>
-        <td>
-          <div class="user-cell">
-            <div class="user-avatar" style="width:30px;height:30px;font-size:12px">${initials(u.full_name||u.username)}</div>
-            <div>
-              <div style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:4px">
-                ${u.full_name||u.username}
-                ${u.is_hub?hubTickSVG():(u.is_verified?verifyTickSVG():'')}
-              </div>
-              <div style="font-size:11px;color:var(--text3)">@${u.username||'—'}</div>
-            </div>
-          </div>
-        </td>
-        <td style="font-size:13px;color:var(--text2)">${uniName(u.university_id)}</td>
-        <td>${u.is_banned?'<span class="badge badge-banned">🚫 Banned</span>':u.is_restricted?'<span class="badge badge-restricted">⚠ Restricted</span>':u.is_verified?'<span class="badge badge-verified">✓ Verified</span>':'<span class="badge badge-active">● Active</span>'}</td>
-        <td style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
-      </tr>`).join('')
-    }
+    window._studentsData = { pList, schoolMap, noSchool }
 
     tc.innerHTML = `
-      <div style="margin-bottom:16px">
-        <div style="font-size:13px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px">Students per School</div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:24px">
+      <div style="margin-bottom:20px">
+        <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px">Students per School</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-bottom:4px">
           ${summaryCards}
-          ${noSchool.length ? `
-          <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;display:flex;align-items:center;gap:14px">
-            <div style="width:42px;height:42px;border-radius:10px;background:rgba(107,104,148,0.2);display:flex;align-items:center;justify-content:center;font-size:18px">❓</div>
-            <div style="flex:1"><div style="font-weight:700;font-size:13.5px">No School Assigned</div><div style="font-size:11px;color:var(--text3);margin-top:2px">Profiles without a university</div></div>
+          ${noSchool.length ? `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;display:flex;align-items:center;gap:14px">
+            <div style="width:40px;height:40px;border-radius:10px;background:rgba(107,104,148,0.2);display:flex;align-items:center;justify-content:center;font-size:18px">❓</div>
+            <div style="flex:1"><div style="font-weight:700;font-size:13px">Unassigned</div><div style="font-size:11px;color:var(--text3);margin-top:2px">No university set</div></div>
             <div style="text-align:right"><div style="font-size:22px;font-weight:800;color:var(--text3)">${noSchool.length}</div><div style="font-size:11px;color:var(--text3)">students</div></div>
           </div>` : ''}
         </div>
       </div>
-
       <div class="card">
         <div class="card-header">
           <span class="card-title">All Students</span>
@@ -1693,17 +1746,30 @@ async function renderUniTab() {
         </div>
         <div style="overflow-x:auto">
           <table>
-            <thead><tr><th>Student</th><th>University</th><th>Status</th><th>Joined</th></tr></thead>
-            <tbody id="students-table">
-              ${allRows('all')}
-            </tbody>
+            <thead><tr><th>Student</th><th>University</th><th class="hide-mobile">Status</th><th class="hide-mobile">Joined</th></tr></thead>
+            <tbody id="students-table">${renderStudentRows(pList)}</tbody>
           </table>
         </div>
       </div>`
-
-    // Store data for filtering
-    window._studentsData = { pList, schoolMap, noSchool }
   }
+}
+
+function renderStudentRows(list) {
+  if (!list.length) return `<tr><td colspan="4"><div class="empty"><div class="empty-icon">👥</div><div class="empty-title">No students found</div></div></td></tr>`
+  return list.map(u => `<tr>
+    <td>
+      <div class="user-cell">
+        <div class="user-avatar" style="width:30px;height:30px;font-size:12px">${initials(u.full_name||u.username)}</div>
+        <div>
+          <div style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:4px">${u.full_name||u.username}${u.is_hub?hubTickSVG():(u.is_verified?verifyTickSVG():'')}</div>
+          <div style="font-size:11px;color:var(--text3)">@${u.username||'—'}</div>
+        </div>
+      </div>
+    </td>
+    <td style="font-size:13px;color:var(--text2)">${uniName(u.university_id)}</td>
+    <td class="hide-mobile">${u.is_banned?'<span class="badge badge-banned">🚫 Banned</span>':u.is_restricted?'<span class="badge badge-restricted">⚠ Restricted</span>':u.is_verified?'<span class="badge badge-verified">✓ Verified</span>':'<span class="badge badge-active">● Active</span>'}</td>
+    <td class="hide-mobile" style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
+  </tr>`).join('')
 }
 
 function filterStudentTable() {
@@ -1714,23 +1780,7 @@ function filterStudentTable() {
   let list = school === 'all' ? pList : school === 'none' ? noSchool : (schoolMap[school]?.students || [])
   if (search) list = list.filter(u => (u.full_name||'').toLowerCase().includes(search) || (u.username||'').toLowerCase().includes(search))
   document.getElementById('students-count').textContent = `${list.length} total`
-  document.getElementById('students-table').innerHTML = list.map(u => `<tr>
-    <td>
-      <div class="user-cell">
-        <div class="user-avatar" style="width:30px;height:30px;font-size:12px">${initials(u.full_name||u.username)}</div>
-        <div>
-          <div style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:4px">
-            ${u.full_name||u.username}
-            ${u.is_hub?hubTickSVG():(u.is_verified?verifyTickSVG():'')}
-          </div>
-          <div style="font-size:11px;color:var(--text3)">@${u.username||'—'}</div>
-        </div>
-      </div>
-    </td>
-    <td style="font-size:13px;color:var(--text2)">${uniName(u.university_id)}</td>
-    <td>${u.is_banned?'<span class="badge badge-banned">🚫 Banned</span>':u.is_restricted?'<span class="badge badge-restricted">⚠ Restricted</span>':u.is_verified?'<span class="badge badge-verified">✓ Verified</span>':'<span class="badge badge-active">● Active</span>'}</td>
-    <td style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
-  </tr>`).join('')
+  document.getElementById('students-table').innerHTML = renderStudentRows(list)
 }
 
 function openAddUniModal() {
@@ -1986,50 +2036,4 @@ async function loadAmbReferrals() {
   pc.innerHTML = `
     <div style="display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap">
       <div class="stat-card green" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">${refs.filter(r=>r.status==='verified').length}</div><div style="font-size:12px;color:var(--text2)">Total Verified</div></div>
-      <div class="stat-card amber" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">${refs.filter(r=>r.status==='pending').length}</div><div style="font-size:12px;color:var(--text2)">Pending Verification</div></div>
-      <div class="stat-card red" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">${refs.filter(r=>r.is_flagged).length}</div><div style="font-size:12px;color:var(--text2)">Flagged</div></div>
-    </div>
-    <div class="card">
-      <div class="card-header"><span class="card-title">All Referrals</span><span class="card-count">${refs.length}</span></div>
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr><th>Student</th><th>Ambassador</th><th>School</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead>
-          <tbody>
-            ${refs.map(r => `<tr>
-              <td>
-                <div style="font-weight:600;font-size:13px">${r.student_name||'Unknown'}</div>
-                <div style="font-size:11px;color:var(--text3)">${r.student_email||''}</div>
-              </td>
-              <td style="font-size:13px;color:var(--brand)">${r.ambassadors?.full_name||'—'} <span style="color:var(--text3);font-size:11px">${r.ambassadors?.referral_code||''}</span></td>
-              <td style="font-size:13px;color:var(--text2)">${r.student_school||'—'}</td>
-              <td style="font-size:12px;color:var(--text3)">${fmtDate(r.created_at)}</td>
-              <td><span class="badge ${r.status==='verified'?'badge-hub':r.status==='rejected'?'badge-banned':'badge-restricted'}">${r.status}</span>${r.is_flagged?'<span class="badge badge-banned" style="margin-left:4px">🚩</span>':''}</td>
-              <td>
-                <div style="display:flex;gap:6px">
-                  ${r.status==='pending'?`
-                    <button class="btn btn-success btn-sm" onclick="verifyReferral('${r.id}')">✓ Verify</button>
-                    <button class="btn btn-danger btn-sm" onclick="rejectReferral('${r.id}')">✗ Reject</button>
-                  `:''}
-                  ${!r.is_flagged?`<button class="btn btn-warn btn-sm" onclick="flagReferral('${r.id}')">🚩 Flag</button>`:''}
-                </div>
-              </td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>`
-}
-
-async function verifyReferral(id) {
-  const { error } = await db.from('ambassador_referrals').update({ status: 'verified', verified_at: new Date().toISOString() }).eq('id', id)
-  if (error) { toast('Failed', 'error'); return }
-  toast('✅ Referral verified — earnings unlocked', 'success')
-  loadAmbReferrals()
-}
-async function rejectReferral(id) {
-  const { error } = await db.from('ambassador_referrals').update({ status: 'rejected' }).eq('id', id)
-  if (error) { toast('Failed', 'error'); return }
-  toast('Referral rejected', 'info')
-  loadAmbReferrals()
-}
-async func
+      <div class="stat-card amber" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">${refs.filter(r=>r.status==='pending').length}</div><div style="font-size:12px;color:v
