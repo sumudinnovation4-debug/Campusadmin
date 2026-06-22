@@ -1529,28 +1529,208 @@ function renderOrders() {
 // ========================================================
 // RENDER — UNIVERSITIES
 // ========================================================
+let uniActiveTab = 'campuses'
+
 async function loadUniversities() {
-  const { data } = await db.from('universities').select('*').order('name')
   const pc = document.getElementById('page-content')
   if (!pc) return
   pc.innerHTML = `
-    <div style="display:flex;justify-content:flex-end;margin-bottom:16px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px">
+      <div class="page-tabs">
+        <button class="page-tab ${uniActiveTab==='campuses'?'active':''}" onclick="switchUniTab('campuses')">🎓 Campuses</button>
+        <button class="page-tab ${uniActiveTab==='students'?'active':''}" onclick="switchUniTab('students')">👥 Students</button>
+      </div>
       <button class="btn btn-primary" onclick="openAddUniModal()">+ Add University</button>
     </div>
-    <div class="card">
-      <div class="card-header"><span class="card-title">Universities</span><span class="card-count">${data?.length||0}</span></div>
-      <table>
-        <thead><tr><th>Name</th><th>Slug</th><th>Created</th><th>Actions</th></tr></thead>
-        <tbody>
-          ${(data||[]).map(u => `<tr>
-            <td style="font-weight:600">${u.name}</td>
-            <td><span class="badge badge-post">${u.slug}</span></td>
-            <td style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
-            <td><button class="btn btn-danger btn-sm" onclick="deleteUni('${u.id}','${u.name}')">Remove</button></td>
-          </tr>`).join('')}
-        </tbody>
-      </table>
-    </div>`
+    <div id="uni-tab-content"><div class="loader"><div class="spinner"></div></div></div>`
+  renderUniTab()
+}
+
+async function switchUniTab(tab) {
+  uniActiveTab = tab
+  document.querySelectorAll('.page-tab').forEach(el => el.classList.remove('active'))
+  const tabs = document.querySelectorAll('.page-tab')
+  tabs.forEach(t => { if (t.textContent.includes(tab === 'campuses' ? 'Campuses' : 'Students')) t.classList.add('active') })
+  const tc = document.getElementById('uni-tab-content')
+  if (tc) tc.innerHTML = '<div class="loader"><div class="spinner"></div></div>'
+  renderUniTab()
+}
+
+async function renderUniTab() {
+  const tc = document.getElementById('uni-tab-content')
+  if (!tc) return
+
+  if (uniActiveTab === 'campuses') {
+    const { data } = await db.from('universities').select('*').order('name')
+    // Enrich with student counts from uniBreakdown
+    const countMap = {}
+    ;(state.uniBreakdown || []).forEach(u => { countMap[u.name] = u.count })
+    tc.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">All Campuses</span>
+          <span class="card-count">${data?.length||0} universities</span>
+        </div>
+        <table>
+          <thead><tr><th>Name</th><th>Slug</th><th>Students</th><th>Created</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${(data||[]).map(u => {
+              const cnt = countMap[u.name] || 0
+              return `<tr>
+                <td style="font-weight:600">${u.name}</td>
+                <td><span class="badge badge-post">${u.slug}</span></td>
+                <td>
+                  <span style="font-weight:700;font-size:13px;color:var(--brand)">${cnt.toLocaleString()}</span>
+                  ${cnt > 0 ? `<span style="font-size:11px;color:var(--text3);margin-left:4px">students</span>` : '<span style="font-size:11px;color:var(--text3)"> —</span>'}
+                </td>
+                <td style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
+                <td><button class="btn btn-danger btn-sm" onclick="deleteUni('${u.id}','${u.name}')">Remove</button></td>
+              </tr>`
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`
+
+  } else {
+    // Students tab — per-school summary + full student list
+    const [{ data: unis }, { data: profiles }] = await Promise.all([
+      db.from('universities').select('id, name, slug').order('name'),
+      db.from('profiles').select('id, full_name, username, university_id, is_verified, is_restricted, is_banned, is_hub, created_at').order('created_at', { ascending: false }).limit(500)
+    ])
+
+    const uList = unis || []
+    const pList = profiles || []
+
+    // Build per-school map
+    const schoolMap = {}
+    uList.forEach(u => { schoolMap[u.id] = { ...u, students: [] } })
+    let noSchool = []
+    pList.forEach(p => {
+      if (p.university_id && schoolMap[p.university_id]) {
+        schoolMap[p.university_id].students.push(p)
+      } else {
+        noSchool.push(p)
+      }
+    })
+
+    const sorted = Object.values(schoolMap).sort((a, b) => b.students.length - a.students.length)
+    const total = pList.length
+
+    // Summary cards
+    const summaryCards = sorted.map((s, i) => {
+      const pct = total > 0 ? Math.round(s.students.length / total * 100) : 0
+      const colors = ['#7C3AED','#10B981','#F59E0B','#3B82F6','#F97316','#EF4444','#A855F7','#06B6D4']
+      const col = colors[i % colors.length]
+      return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;display:flex;align-items:center;gap:14px">
+        <div style="width:42px;height:42px;border-radius:10px;background:${col}22;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">🎓</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:700;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.name}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">${pct}% of total students</div>
+          <div style="height:4px;background:var(--border);border-radius:2px;margin-top:7px">
+            <div style="height:4px;border-radius:2px;background:${col};width:${pct}%"></div>
+          </div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:22px;font-weight:800;color:${col}">${s.students.length.toLocaleString()}</div>
+          <div style="font-size:11px;color:var(--text3)">students</div>
+        </div>
+      </div>`
+    }).join('')
+
+    // Per-school filter
+    const filterOpts = `<option value="all">All Schools</option>
+      ${sorted.map(s => `<option value="${s.id}">${s.name} (${s.students.length})</option>`).join('')}
+      ${noSchool.length ? `<option value="none">No School Assigned (${noSchool.length})</option>` : ''}`
+
+    // Student rows
+    const allRows = (filterVal) => {
+      let list = filterVal === 'all' ? pList
+        : filterVal === 'none' ? noSchool
+        : (schoolMap[filterVal]?.students || [])
+      return list.map(u => `<tr>
+        <td>
+          <div class="user-cell">
+            <div class="user-avatar" style="width:30px;height:30px;font-size:12px">${initials(u.full_name||u.username)}</div>
+            <div>
+              <div style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:4px">
+                ${u.full_name||u.username}
+                ${u.is_hub?hubTickSVG():(u.is_verified?verifyTickSVG():'')}
+              </div>
+              <div style="font-size:11px;color:var(--text3)">@${u.username||'—'}</div>
+            </div>
+          </div>
+        </td>
+        <td style="font-size:13px;color:var(--text2)">${uniName(u.university_id)}</td>
+        <td>${u.is_banned?'<span class="badge badge-banned">🚫 Banned</span>':u.is_restricted?'<span class="badge badge-restricted">⚠ Restricted</span>':u.is_verified?'<span class="badge badge-verified">✓ Verified</span>':'<span class="badge badge-active">● Active</span>'}</td>
+        <td style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
+      </tr>`).join('')
+    }
+
+    tc.innerHTML = `
+      <div style="margin-bottom:16px">
+        <div style="font-size:13px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px">Students per School</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:24px">
+          ${summaryCards}
+          ${noSchool.length ? `
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;display:flex;align-items:center;gap:14px">
+            <div style="width:42px;height:42px;border-radius:10px;background:rgba(107,104,148,0.2);display:flex;align-items:center;justify-content:center;font-size:18px">❓</div>
+            <div style="flex:1"><div style="font-weight:700;font-size:13.5px">No School Assigned</div><div style="font-size:11px;color:var(--text3);margin-top:2px">Profiles without a university</div></div>
+            <div style="text-align:right"><div style="font-size:22px;font-weight:800;color:var(--text3)">${noSchool.length}</div><div style="font-size:11px;color:var(--text3)">students</div></div>
+          </div>` : ''}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">All Students</span>
+          <span class="card-count" id="students-count">${pList.length} total</span>
+          <div class="card-actions">
+            <input class="search-box" placeholder="Search name or username..." id="student-search" oninput="filterStudentTable()" />
+            <select class="filter-select" id="student-school-filter" onchange="filterStudentTable()">
+              ${filterOpts}
+            </select>
+          </div>
+        </div>
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr><th>Student</th><th>University</th><th>Status</th><th>Joined</th></tr></thead>
+            <tbody id="students-table">
+              ${allRows('all')}
+            </tbody>
+          </table>
+        </div>
+      </div>`
+
+    // Store data for filtering
+    window._studentsData = { pList, schoolMap, noSchool }
+  }
+}
+
+function filterStudentTable() {
+  const search = (document.getElementById('student-search')?.value || '').toLowerCase()
+  const school = document.getElementById('student-school-filter')?.value || 'all'
+  const { pList, schoolMap, noSchool } = window._studentsData || {}
+  if (!pList) return
+  let list = school === 'all' ? pList : school === 'none' ? noSchool : (schoolMap[school]?.students || [])
+  if (search) list = list.filter(u => (u.full_name||'').toLowerCase().includes(search) || (u.username||'').toLowerCase().includes(search))
+  document.getElementById('students-count').textContent = `${list.length} total`
+  document.getElementById('students-table').innerHTML = list.map(u => `<tr>
+    <td>
+      <div class="user-cell">
+        <div class="user-avatar" style="width:30px;height:30px;font-size:12px">${initials(u.full_name||u.username)}</div>
+        <div>
+          <div style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:4px">
+            ${u.full_name||u.username}
+            ${u.is_hub?hubTickSVG():(u.is_verified?verifyTickSVG():'')}
+          </div>
+          <div style="font-size:11px;color:var(--text3)">@${u.username||'—'}</div>
+        </div>
+      </div>
+    </td>
+    <td style="font-size:13px;color:var(--text2)">${uniName(u.university_id)}</td>
+    <td>${u.is_banned?'<span class="badge badge-banned">🚫 Banned</span>':u.is_restricted?'<span class="badge badge-restricted">⚠ Restricted</span>':u.is_verified?'<span class="badge badge-verified">✓ Verified</span>':'<span class="badge badge-active">● Active</span>'}</td>
+    <td style="font-size:12px;color:var(--text3)">${fmtDate(u.created_at)}</td>
+  </tr>`).join('')
 }
 
 function openAddUniModal() {
@@ -1852,82 +2032,4 @@ async function rejectReferral(id) {
   toast('Referral rejected', 'info')
   loadAmbReferrals()
 }
-async function flagReferral(id) {
-  await db.from('ambassador_referrals').update({ is_flagged: true }).eq('id', id)
-  toast('🚩 Referral flagged for review', 'error')
-  loadAmbReferrals()
-}
-
-async function loadAmbPayouts() {
-  const { data } = await db.from('ambassador_payouts')
-    .select('*, ambassadors(full_name, referral_code)')
-    .order('created_at', { ascending: false })
-  const pc = document.getElementById('page-content')
-  if (!pc) return
-  const payouts = data || []
-  const pending = payouts.filter(p => p.status === 'pending')
-  pc.innerHTML = `
-    <div style="display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap">
-      <div class="stat-card amber" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">${pending.length}</div><div style="font-size:12px;color:var(--text2)">Pending Requests</div></div>
-      <div class="stat-card green" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">₦${Number(payouts.filter(p=>p.status==='paid').reduce((a,b)=>a+(b.amount||0),0)).toLocaleString()}</div><div style="font-size:12px;color:var(--text2)">Total Paid Out</div></div>
-      <div class="stat-card purple" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">₦${Number(pending.reduce((a,b)=>a+(b.amount||0),0)).toLocaleString()}</div><div style="font-size:12px;color:var(--text2)">Pending Amount</div></div>
-    </div>
-    <div class="card">
-      <div class="card-header"><span class="card-title">Payout Requests</span><span class="card-count">${payouts.length}</span></div>
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr><th>Ambassador</th><th>Amount</th><th>Bank</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead>
-          <tbody>
-            ${payouts.map(p => `<tr>
-              <td style="font-weight:600;font-size:13px">${p.ambassadors?.full_name||'—'} <span style="color:var(--text3);font-size:11px">${p.ambassadors?.referral_code||''}</span></td>
-              <td style="font-weight:700;color:var(--green);font-size:14px">₦${Number(p.amount||0).toLocaleString()}</td>
-              <td style="font-size:13px;color:var(--text2)">${p.bank_name||'—'} · ${p.account_number||'—'}</td>
-              <td style="font-size:12px;color:var(--text3)">${fmtDate(p.created_at)}</td>
-              <td><span class="badge ${p.status==='paid'?'badge-hub':p.status==='rejected'?'badge-banned':'badge-restricted'}">${p.status}</span></td>
-              <td>
-                <div style="display:flex;gap:6px">
-                  ${p.status==='pending'?`
-                    <button class="btn btn-success btn-sm" onclick="approvePayout('${p.id}')">✓ Mark Paid</button>
-                    <button class="btn btn-danger btn-sm" onclick="rejectPayout('${p.id}')">✗ Reject</button>
-                  `:p.status==='paid'?'<span style="color:var(--text3);font-size:12px">Paid ✓</span>':''}
-                </div>
-              </td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>`
-}
-
-async function approvePayout(id) {
-  const { error } = await db.from('ambassador_payouts').update({ status: 'paid', paid_at: new Date().toISOString() }).eq('id', id)
-  if (error) { toast('Failed', 'error'); return }
-  toast('✅ Payout marked as paid', 'success')
-  loadAmbPayouts()
-}
-async function rejectPayout(id) {
-  const { error } = await db.from('ambassador_payouts').update({ status: 'rejected' }).eq('id', id)
-  if (error) { toast('Failed', 'error'); return }
-  toast('Payout rejected', 'info')
-  loadAmbPayouts()
-}
-
-// ========================================================
-// DEBOUNCE
-// ========================================================
-let debounceTimers = {}
-function debounceLoad(type) {
-  clearTimeout(debounceTimers[type])
-  debounceTimers[type] = setTimeout(() => {
-    if (type === 'users') loadUsers()
-    if (type === 'posts') loadPosts()
-  }, 350)
-}
-
-// ========================================================
-// INIT
-// ========================================================
-checkAuth()
-</script>
-</body>
-</html>
+async func
