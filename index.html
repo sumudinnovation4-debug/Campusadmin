@@ -800,14 +800,16 @@ async function deleteUser(userId) {
   loadUsers(); loadStats()
 }
 
-async function publishHubPost(content, pollMode, pollOptions, endsIn, mediaNote) {
+async function publishHubPost(content, pollMode, pollOptions, endsIn, imageUrl) {
   if (!content.trim()) { toast('Write some content first', 'error'); return false }
   const { data: postData, error } = await db.from('posts').insert({
     author_id: state.user.id,
     content,
     is_hub_service: true,
-    post_type: pollMode ? 'poll' : 'text',
+    post_type: pollMode ? 'poll' : (imageUrl ? 'image' : 'text'),
     university_id: null,
+    media_urls: imageUrl ? [imageUrl] : [],
+    media_types: imageUrl ? ['image'] : [],
   }).select().single()
   if (error) { toast('Hub post failed: ' + error.message, 'error'); console.error(error); return false }
 
@@ -848,6 +850,37 @@ async function callOrderApi(path, orderType, orderId) {
   try { data = await res.json() } catch { throw new Error(`Server didn't return JSON from /api/${path} (status ${res.status})`) }
   if (!res.ok) throw new Error(data.error || 'Request failed')
   return data
+}
+
+// Like callOrderApi, but for endpoints that need to verify the CALLER is an
+// admin server-side (anything that can create or destroy money out of
+// nothing, like a manual wallet adjustment, rather than just move money
+// that a real payment already brought onto the platform).
+async function callAdminApi(path, body) {
+  const { data: { session } } = await db.auth.getSession()
+  const res = await fetch(`/api/${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session?.access_token || ''}` },
+    body: JSON.stringify(body),
+  })
+  let data
+  try { data = await res.json() } catch { throw new Error(`Server didn't return JSON from /api/${path} (status ${res.status})`) }
+  if (!res.ok) throw new Error(data.error || 'Request failed')
+  return data
+}
+
+// Reusable image upload used by any admin form that needs to attach a
+// picture (Hub Post composer today; drop it into any future form the same
+// way). Uses the same Cloudinary unsigned preset the rest of the app uses.
+async function uploadImageToCloudinary(file) {
+  const CLOUD_NAME = 'dkkowi2j9', PRESET = 'campusplug'
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('upload_preset', PRESET)
+  const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`, { method: 'POST', body: formData })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data?.error?.message || 'Image upload failed')
+  return data.secure_url
 }
 
 async function releaseOrder(orderType, orderId) {
@@ -974,6 +1007,11 @@ function renderModal() {
             <label class="form-label">Content / Announcement</label>
             <textarea class="form-textarea" id="hub-content" placeholder="Write an announcement, event notice, or poll question..." style="min-height:120px"></textarea>
           </div>
+          <div class="form-group">
+            <label class="form-label">Image (optional)</label>
+            <input type="file" accept="image/*" id="hub-image-input" onchange="handleHubImageSelect(event)">
+            <div id="hub-image-preview" style="margin-top:8px"></div>
+          </div>
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
             <input type="checkbox" id="hub-poll-toggle" onchange="document.getElementById('hub-poll-section').style.display=this.checked?'block':'none'" style="width:16px;height:16px;accent-color:var(--brand)">
             <label for="hub-poll-toggle" style="font-size:14px;font-weight:600;cursor:pointer">Add a Poll / Voice Cast</label>
@@ -1057,6 +1095,14 @@ function addPollOption() {
   pollOptCount++
 }
 
+let hubImageFile = null
+function handleHubImageSelect(e) {
+  hubImageFile = e.target.files?.[0] || null
+  const preview = document.getElementById('hub-image-preview')
+  if (!preview) return
+  preview.innerHTML = hubImageFile ? `<div style="font-size:12px;color:var(--text2)">📎 ${hubImageFile.name} — will upload on publish</div>` : ''
+}
+
 async function submitHubPost() {
   const content = document.getElementById('hub-content')?.value || ''
   const pollMode = document.getElementById('hub-poll-toggle')?.checked || false
@@ -1067,7 +1113,14 @@ async function submitHubPost() {
     if (v.trim()) opts.push(v.trim())
   }
   pollOptCount = 2
-  await publishHubPost(content, pollMode, opts, endsIn, '')
+
+  let imageUrl = null
+  if (hubImageFile) {
+    try { imageUrl = await uploadImageToCloudinary(hubImageFile) }
+    catch (err) { toast('Image upload failed: ' + err.message, 'error'); return }
+  }
+  hubImageFile = null
+  await publishHubPost(content, pollMode, opts, endsIn, imageUrl)
 }
 
 // ========================================================
@@ -1150,8 +1203,21 @@ function renderApp() {
       ${navItem('amb-payouts','💰','Payouts')}
     </div>
     <div class="sidebar-section">
+      <div class="sidebar-section-label">Finance</div>
+      ${navItem('wallets','💳','Wallets')}
+      ${navItem('ledger','📒','Transactions')}
+      ${navItem('payout-accounts','🏦','Payout Accounts')}
+      ${navItem('p2p','🔁','P2P Transfers')}
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Community</div>
+      ${navItem('groups','👨‍👩‍👧','Groups')}
+      ${navItem('notifications','🔔','Broadcast')}
+    </div>
+    <div class="sidebar-section">
       <div class="sidebar-section-label">Settings</div>
       ${navItem('universities','🎓','Universities')}
+      ${navItem('swift-settings','🛵','Swift Settings')}
     </div>
     <div class="sidebar-footer">
       <div class="sidebar-user">
@@ -1206,6 +1272,13 @@ function navigateTo(page) {
     ambassadors: ['Ambassadors', 'Manage campus ambassadors'],
     'amb-referrals': ['Ambassador Referrals', 'All referrals across ambassadors'],
     'amb-payouts': ['Ambassador Payouts', 'Manage payout requests'],
+    wallets: ['Wallets', 'Every user\'s in-app balance'],
+    ledger: ['Transactions', 'Full wallet transaction ledger'],
+    'payout-accounts': ['Payout Accounts', 'Bank accounts linked for withdrawals'],
+    p2p: ['P2P Transfers', 'Wallet-to-wallet transfers between users'],
+    groups: ['Groups', 'Campus chat groups'],
+    notifications: ['Broadcast', 'Send a notification to users'],
+    'swift-settings': ['Swift Settings', 'Open/close Swift delivery per campus'],
   }
   const [title, sub] = titles[page] || [page, '']
   document.getElementById('topbar-title').textContent = title
@@ -1224,6 +1297,13 @@ function navigateTo(page) {
   else if (page === 'ambassadors') { loadAmbassadors(); }
   else if (page === 'amb-referrals') { loadAmbReferrals(); }
   else if (page === 'amb-payouts') { loadAmbPayouts(); }
+  else if (page === 'wallets') { loadWallets(); }
+  else if (page === 'ledger') { loadLedger(); }
+  else if (page === 'payout-accounts') { loadPayoutAccounts(); }
+  else if (page === 'p2p') { loadP2P(); }
+  else if (page === 'groups') { loadGroups(); }
+  else if (page === 'notifications') { renderBroadcast(); }
+  else if (page === 'swift-settings') { loadSwiftSettings(); }
 }
 
 // ========================================================
@@ -1666,6 +1746,346 @@ function renderOrders() {
         </table>
       </div>
     </div>`
+}
+
+// ========================================================
+// FINANCE — WALLETS
+// ========================================================
+let walletSearch = ''
+async function loadWallets() {
+  let q = db.from('wallets').select('*, profiles:user_id(username, full_name)').order('balance_kobo', { ascending: false }).limit(200)
+  const { data, error } = await q
+  if (error) { toast('Wallets error: ' + error.message, 'error'); console.error(error) }
+  state.wallets = (data || []).filter(w => !walletSearch || (w.profiles?.username||'').toLowerCase().includes(walletSearch.toLowerCase()) || (w.profiles?.full_name||'').toLowerCase().includes(walletSearch.toLowerCase()))
+  renderWallets()
+}
+function renderWallets() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  const totalKobo = (state.wallets||[]).reduce((a,w)=>a+(w.balance_kobo||0),0)
+  pc.innerHTML = `
+    <div class="stat-card purple" style="margin-bottom:16px;max-width:280px"><div style="font-size:22px;font-weight:800">₦${Number(totalKobo/100).toLocaleString()}</div><div style="font-size:12px;color:var(--text2)">Total wallet balance (shown page)</div></div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Wallets</span>
+        <input class="filter-select" style="max-width:220px" placeholder="Search username…" value="${walletSearch}" oninput="walletSearch=this.value" onkeydown="if(event.key==='Enter')loadWallets()">
+        <span class="card-count">${(state.wallets||[]).length}</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>User</th><th>Balance</th><th>Updated</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${(state.wallets||[]).map(w => `<tr>
+              <td style="font-weight:600;font-size:13px">@${w.profiles?.username||'?'} <span style="color:var(--text3);font-weight:400">${w.profiles?.full_name||''}</span></td>
+              <td style="font-weight:700;color:var(--brand)">₦${Number((w.balance_kobo||0)/100).toLocaleString()}</td>
+              <td style="font-size:12px;color:var(--text3)">${w.updated_at?fmtDate(w.updated_at):'—'}</td>
+              <td><button class="btn btn-primary btn-sm" onclick='openAdjustWalletModal(${JSON.stringify({id:w.user_id,name:w.profiles?.username||'user',balance:w.balance_kobo||0})})'>Adjust</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+
+function openAdjustWalletModal(w) {
+  let el = document.getElementById('modal-root')
+  if (!el) { el = document.createElement('div'); el.id = 'modal-root'; document.body.appendChild(el) }
+  el.innerHTML = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal" style="max-width:420px">
+      <div class="modal-header"><span class="modal-title">💳 Adjust @${w.name}'s wallet</span><button class="modal-close" onclick="closeModal()">✕</button></div>
+      <div class="modal-body">
+        <div style="font-size:12px;color:var(--text3);margin-bottom:12px">Current balance: ₦${Number(w.balance/100).toLocaleString()}</div>
+        <div class="form-group">
+          <label class="form-label">Direction</label>
+          <select class="form-input" id="adj-dir"><option value="credit">➕ Credit (add money)</option><option value="debit">➖ Debit (remove money)</option></select>
+        </div>
+        <div class="form-group"><label class="form-label">Amount (₦)</label><input class="form-input" id="adj-amount" type="number" min="1" placeholder="e.g. 5000"></div>
+        <div class="form-group"><label class="form-label">Reason (required — goes in the ledger)</label><textarea class="form-textarea" id="adj-reason" placeholder="e.g. Refund for damaged item, support ticket #123"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick='submitWalletAdjust(${JSON.stringify(w.id)})'>Apply Adjustment</button>
+      </div>
+    </div>
+  </div>`
+}
+
+async function submitWalletAdjust(userId) {
+  const dir = document.getElementById('adj-dir')?.value
+  const amountNaira = Number(document.getElementById('adj-amount')?.value)
+  const reason = document.getElementById('adj-reason')?.value.trim()
+  if (!amountNaira || amountNaira <= 0) { toast('Enter a valid amount', 'error'); return }
+  if (!reason) { toast('A reason is required', 'error'); return }
+  const amount_kobo = Math.round(amountNaira * 100) * (dir === 'debit' ? -1 : 1)
+  try {
+    await callAdminApi('admin-wallet-adjust', { user_id: userId, amount_kobo, reason })
+    toast('✅ Wallet adjusted', 'success')
+    closeModal(); loadWallets()
+  } catch (err) { toast('Failed: ' + err.message, 'error') }
+}
+
+// ========================================================
+// FINANCE — LEDGER (wallet_transactions)
+// ========================================================
+let ledgerTypeFilter = 'all'
+async function loadLedger() {
+  let q = db.from('wallet_transactions').select('*, profiles:user_id(username)').order('created_at', { ascending: false }).limit(200)
+  if (ledgerTypeFilter !== 'all') q = q.eq('type', ledgerTypeFilter)
+  const { data, error } = await q
+  if (error) { toast('Ledger error: ' + error.message, 'error'); console.error(error) }
+  state.ledger = data || []
+  renderLedger()
+}
+function renderLedger() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  const types = ['all','escrow_release','withdrawal','p2p_out','p2p_in','ambassador_commission','admin_adjustment']
+  pc.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Transaction Ledger</span>
+        <select class="filter-select" onchange="ledgerTypeFilter=this.value;loadLedger()">
+          ${types.map(t=>`<option value="${t}" ${ledgerTypeFilter===t?'selected':''}>${t==='all'?'All types':t}</option>`).join('')}
+        </select>
+        <span class="card-count">${state.ledger.length}</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>User</th><th>Type</th><th>Amount</th><th>Note</th><th>Date</th></tr></thead>
+          <tbody>
+            ${state.ledger.map(t => `<tr>
+              <td style="font-weight:600;font-size:13px">@${t.profiles?.username||'?'}</td>
+              <td><span class="badge ${t.type==='admin_adjustment'?'badge-restricted':'badge-post'}">${t.type}</span></td>
+              <td style="font-weight:700;color:${(t.amount_kobo||0)<0?'var(--red)':'var(--green)'}">${(t.amount_kobo||0)<0?'-':'+'}₦${Number(Math.abs(t.amount_kobo||0)/100).toLocaleString()}</td>
+              <td style="font-size:12px;color:var(--text2);max-width:280px">${t.note||'—'}</td>
+              <td style="font-size:12px;color:var(--text3)">${t.created_at?fmtDate(t.created_at):'—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+
+// ========================================================
+// FINANCE — PAYOUT ACCOUNTS (payout_recipients)
+// ========================================================
+async function loadPayoutAccounts() {
+  const { data, error } = await db.from('payout_recipients').select('*, profiles:user_id(username, full_name)').limit(200)
+  if (error) { toast('Payout accounts error: ' + error.message, 'error'); console.error(error) }
+  state.payoutAccounts = data || []
+  renderPayoutAccounts()
+}
+function renderPayoutAccounts() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  pc.innerHTML = `
+    <div style="font-size:12px;color:var(--text3);padding:0 0 10px">Read-only — these are tokenized with Paystack. To remove one (e.g. fraud), delete it here; the user will be asked to re-add a bank account before their next withdrawal.</div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Linked Bank Accounts</span><span class="card-count">${state.payoutAccounts.length}</span></div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>User</th><th>Bank</th><th>Account</th><th>Name on Account</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${state.payoutAccounts.map(p => `<tr>
+              <td style="font-weight:600;font-size:13px">@${p.profiles?.username||'?'}</td>
+              <td style="font-size:13px">${p.bank_name||'—'}</td>
+              <td style="font-family:monospace;font-size:12px">${p.account_number||'—'}</td>
+              <td style="font-size:13px">${p.account_name||'—'}</td>
+              <td><button class="btn btn-danger btn-sm" onclick="removePayoutAccount('${p.user_id}')">Remove</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+async function removePayoutAccount(userId) {
+  if (!confirmAction('Remove this bank account? The user will need to re-add one before withdrawing again.')) return
+  const { error } = await db.from('payout_recipients').delete().eq('user_id', userId)
+  if (error) { toast('Failed: ' + error.message, 'error'); return }
+  toast('Removed', 'success')
+  loadPayoutAccounts()
+}
+
+// ========================================================
+// FINANCE — P2P TRANSFERS
+// ========================================================
+async function loadP2P() {
+  const { data, error } = await db.from('p2p_transfers').select('*, sender:sender_id(username), receiver:receiver_id(username)').order('created_at', { ascending: false }).limit(200)
+  if (error) { toast('P2P error: ' + error.message, 'error'); console.error(error) }
+  state.p2p = data || []
+  renderP2P()
+}
+function renderP2P() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  pc.innerHTML = `
+    <div class="card">
+      <div class="card-header"><span class="card-title">P2P Transfers</span><span class="card-count">${state.p2p.length}</span></div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>From → To</th><th>Amount</th><th>Note</th><th>Date</th></tr></thead>
+          <tbody>
+            ${state.p2p.map(t => `<tr>
+              <td style="font-size:13px">@${t.sender?.username||'?'} → @${t.receiver?.username||'?'}</td>
+              <td style="font-weight:700;color:var(--brand)">₦${Number((t.amount_kobo||0)/100).toLocaleString()}</td>
+              <td style="font-size:12px;color:var(--text2)">${t.note||'—'}</td>
+              <td style="font-size:12px;color:var(--text3)">${t.created_at?fmtDate(t.created_at):'—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+
+// ========================================================
+// COMMUNITY — GROUPS
+// ========================================================
+async function loadGroups() {
+  const { data, error } = await db.from('groups').select('*, creator:creator_id(username), universities(name)').order('created_at', { ascending: false }).limit(200)
+  if (error) { toast('Groups error: ' + error.message, 'error'); console.error(error) }
+  state.groupsList = data || []
+  renderGroups()
+}
+function renderGroups() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  pc.innerHTML = `
+    <div class="card">
+      <div class="card-header"><span class="card-title">Campus Groups</span><span class="card-count">${state.groupsList.length}</span></div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Name</th><th>Campus</th><th>Creator</th><th>Members</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${state.groupsList.map(g => `<tr>
+              <td style="font-weight:600;font-size:13px;max-width:180px">${g.name}${g.is_private?' 🔒':''}</td>
+              <td style="font-size:12px;color:var(--text2)">${g.universities?.name||'—'}</td>
+              <td style="font-size:12px;color:var(--text2)">@${g.creator?.username||'?'}</td>
+              <td style="font-size:13px">${g.member_count||0}</td>
+              <td><span class="badge ${g.is_active?'badge-verified':'badge-banned'}">${g.is_active?'active':'disabled'}</span></td>
+              <td>
+                <div style="display:flex;gap:6px">
+                  <button class="btn ${g.is_active?'btn-warn':'btn-success'} btn-sm" onclick="toggleGroupActive('${g.id}',${g.is_active})">${g.is_active?'Disable':'Re-enable'}</button>
+                  <button class="btn btn-danger btn-sm" onclick="deleteGroup('${g.id}')">Delete</button>
+                </div>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+async function toggleGroupActive(id, current) {
+  const { error } = await db.from('groups').update({ is_active: !current }).eq('id', id)
+  if (error) { toast('Failed: ' + error.message, 'error'); return }
+  toast(current ? 'Group disabled' : 'Group re-enabled', 'success')
+  loadGroups()
+}
+async function deleteGroup(id) {
+  if (!confirmAction('Permanently delete this group and its messages?')) return
+  const { error } = await db.from('groups').delete().eq('id', id)
+  if (error) { toast('Delete failed: ' + error.message, 'error'); return }
+  toast('Group deleted', 'success')
+  loadGroups()
+}
+
+// ========================================================
+// COMMUNITY — BROADCAST (notifications)
+// ========================================================
+function renderBroadcast() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  const uniOptions = (state.universitiesList || []).map(u => `<option value="${u.id}">${u.name}</option>`).join('')
+  pc.innerHTML = `
+    <div class="card" style="max-width:520px">
+      <div class="card-header"><span class="card-title">🔔 Send a Notification</span></div>
+      <div style="padding:16px">
+        <div class="form-group"><label class="form-label">Audience</label>
+          <select class="form-input" id="bc-audience">
+            <option value="all">All users</option>
+            <option value="uni">One campus…</option>
+          </select>
+        </div>
+        <div class="form-group" id="bc-uni-wrap" style="display:none">
+          <label class="form-label">Campus</label>
+          <select class="form-input" id="bc-uni">${uniOptions}</select>
+        </div>
+        <div class="form-group"><label class="form-label">Title</label><input class="form-input" id="bc-title" placeholder="e.g. New feature: Swift delivery is live!"></div>
+        <div class="form-group"><label class="form-label">Message</label><textarea class="form-textarea" id="bc-body" placeholder="Write your message…"></textarea></div>
+        <button class="btn btn-primary" onclick="sendBroadcast()" style="width:100%">📢 Send Notification</button>
+      </div>
+    </div>`
+  document.getElementById('bc-audience').addEventListener('change', (e) => {
+    document.getElementById('bc-uni-wrap').style.display = e.target.value === 'uni' ? 'block' : 'none'
+  })
+  if (!state.universitiesList) db.from('universities').select('id,name').order('name').then(({data}) => { state.universitiesList = data || []; if (state.page==='notifications') renderBroadcast() })
+}
+async function sendBroadcast() {
+  const audience = document.getElementById('bc-audience')?.value
+  const uniId = document.getElementById('bc-uni')?.value
+  const title = document.getElementById('bc-title')?.value.trim()
+  const body = document.getElementById('bc-body')?.value.trim()
+  if (!title || !body) { toast('Fill in title and message', 'error'); return }
+  if (!confirmAction(`Send this to ${audience==='all'?'ALL users':'this campus'}? This can't be undone.`)) return
+
+  let q = db.from('profiles').select('id')
+  if (audience === 'uni' && uniId) q = q.eq('university_id', uniId)
+  const { data: users, error } = await q
+  if (error) { toast('Failed to load audience: ' + error.message, 'error'); return }
+  if (!users || !users.length) { toast('No matching users', 'error'); return }
+
+  const rows = users.map(u => ({ user_id: u.id, type: 'broadcast', title, body, is_read: false }))
+  // Chunk to keep each insert reasonably sized
+  for (let i = 0; i < rows.length; i += 500) {
+    const chunk = rows.slice(i, i + 500)
+    const { error: insErr } = await db.from('notifications').insert(chunk)
+    if (insErr) { toast('Broadcast partially failed: ' + insErr.message, 'error'); return }
+  }
+  toast(`📢 Sent to ${rows.length} users`, 'success')
+  document.getElementById('bc-title').value = ''
+  document.getElementById('bc-body').value = ''
+}
+
+// ========================================================
+// SETTINGS — SWIFT SETTINGS
+// ========================================================
+async function loadSwiftSettings() {
+  const [{ data: unis, error: uniErr }, { data: settings, error: setErr }] = await Promise.all([
+    db.from('universities').select('id, name').order('name'),
+    db.from('swift_settings').select('*'),
+  ])
+  if (uniErr) { toast('Universities error: ' + uniErr.message, 'error') }
+  if (setErr) { toast('Swift settings error: ' + setErr.message, 'error') }
+  const settingsMap = {}
+  ;(settings || []).forEach(s => { settingsMap[s.university_id] = s })
+  state.swiftSettings = (unis || []).map(u => ({ id: u.id, name: u.name, is_open: settingsMap[u.id]?.is_open !== false }))
+  renderSwiftSettings()
+}
+function renderSwiftSettings() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  pc.innerHTML = `
+    <div class="card">
+      <div class="card-header"><span class="card-title">Swift Delivery — Per Campus</span><span class="card-count">${state.swiftSettings.length}</span></div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Campus</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>
+            ${state.swiftSettings.map(s => `<tr>
+              <td style="font-weight:600;font-size:13px">${s.name}</td>
+              <td><span class="badge ${s.is_open?'badge-verified':'badge-banned'}">${s.is_open?'Open':'Closed'}</span></td>
+              <td><button class="btn ${s.is_open?'btn-warn':'btn-success'} btn-sm" onclick="toggleSwiftOpen('${s.id}',${s.is_open})">${s.is_open?'Close Swift here':'Reopen Swift here'}</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+async function toggleSwiftOpen(universityId, current) {
+  const { error } = await db.from('swift_settings').upsert({ university_id: universityId, is_open: !current }, { onConflict: 'university_id' })
+  if (error) { toast('Failed: ' + error.message, 'error'); return }
+  toast(current ? '🛑 Swift closed for this campus' : '✅ Swift reopened for this campus', 'success')
+  loadSwiftSettings()
 }
 
 // ========================================================
