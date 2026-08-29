@@ -415,11 +415,6 @@
 const SUPABASE_URL = 'https://zgzamthhfykhjaldosvb.supabase.co'
 const SUPABASE_ANON_KEY = 'sb_publishable_T2qRKGsS33YJPN3BochPTA_r2v_gSlS'
 
-// NOTE: this list is no longer the auth gate — it's only used to produce a
-// more helpful error message on the login screen. The actual gate, both in
-// the UI (checkAuth/login below) and in the database (RLS), is
-// profiles.is_admin. See migrations.sql for the is_admin() policies and the
-// one-time backfill that sets this flag for your admin accounts.
 const ADMIN_EMAILS = [
   'opemuhammad35@gmail.com',
   'sumudinnovation4@gmail.com',
@@ -530,19 +525,30 @@ let state = {
 // ========================================================
 // AUTH
 // ========================================================
+// NOTE ON SECURITY: the ADMIN_EMAILS / is_admin checks below are a UX gate
+// only — they decide whether THIS PAGE shows the dashboard. They are NOT
+// what keeps the database safe, because anyone can read this file's source,
+// grab SUPABASE_URL/ANON_KEY, and call the Supabase client directly from
+// their own script, skipping this file entirely. The real enforcement lives
+// in Postgres Row Level Security policies (see the SQL migration) which
+// check `profiles.is_admin = true` for every admin-only read/write at the
+// database layer, no matter who or what is making the request. Keep both:
+// this check is what makes the UI feel right; RLS is what makes it actually
+// secure.
 async function checkAuth() {
   const { data: { session } } = await db.auth.getSession()
   if (!session) { renderAuth(); return }
   state.user = session.user
-  const { data: profile } = await db.from('profiles').select('*').eq('id', session.user.id).single()
-  state.profile = profile
-  if (!profile?.is_admin) {
-    renderAuthError(
-      'This account is not authorised to access the admin dashboard.' +
-      (ADMIN_EMAILS.includes(session.user.email) ? ' (Run the is_admin backfill in migrations.sql for this email.)' : '')
-    )
+  const { data: profile, error: profileErr } = await db.from('profiles').select('*').eq('id', session.user.id).single()
+  if (profileErr || !profile) {
+    renderAuthError('Could not load your profile.')
     return
   }
+  if (!profile.is_admin && !ADMIN_EMAILS.includes(session.user.email)) {
+    renderAuthError('This account is not authorised to access the admin dashboard.')
+    return
+  }
+  state.profile = profile
   renderApp()
   loadAll()
 }
@@ -551,7 +557,10 @@ async function login(email, password) {
   const { data, error } = await db.auth.signInWithPassword({ email, password })
   if (error) return error.message
   const { data: profile } = await db.from('profiles').select('*').eq('id', data.user.id).single()
-  if (!profile?.is_admin) return 'This account does not have admin access.'
+  if (!profile?.is_admin && !ADMIN_EMAILS.includes(email.toLowerCase())) {
+    await db.auth.signOut()
+    return 'This account does not have admin access.'
+  }
   state.user = data.user
   state.profile = profile
   renderApp()
@@ -603,7 +612,9 @@ async function toggleHub(userId, current) {
 }
 
 async function loadStats() {
-  const [u, p, l, oe, of_, os] = await Promise.all([
+  // There is no single 'orders' table — orders live in three separate
+  // tables depending on type (see loadOrders() below for why).
+  const [u, p, l, escrow, food, swift] = await Promise.all([
     db.from('profiles').select('*', { count: 'exact', head: true }),
     db.from('posts').select('*', { count: 'exact', head: true }),
     db.from('listings').select('*', { count: 'exact', head: true }),
@@ -616,7 +627,7 @@ async function loadStats() {
   state.stats = {
     users: u.count || 0, posts: p.count || 0,
     listings: l.count || 0,
-    orders: (oe.count || 0) + (of_.count || 0) + (os.count || 0),
+    orders: (escrow.count || 0) + (food.count || 0) + (swift.count || 0),
     verified: verified.count || 0, restricted: restricted.count || 0,
   }
   renderStats()
@@ -694,16 +705,50 @@ async function loadHubPosts() {
   renderHubPosts()
 }
 
+// Camplugie has THREE kinds of orders, each in its own table with its own
+// status machine — there is no unified 'orders' table in the schema:
+//   escrow_orders  -> normal marketplace items, haggled in chat
+//   food_orders    -> food-category quick checkout
+//   swift_orders   -> runner-delivered errands (money for these actually
+//                     moves through a linked escrow_orders row, so a Swift
+//                     order's own status is just delivery tracking)
+// This merges all three into one normalized list for the Orders page.
 async function loadOrders() {
-  // Orders live across three real tables (escrow_orders, food_orders,
-  // swift_orders) — admin_orders_view (see migrations.sql) merges them into
-  // one read model with a normalized order_type/listing_title/username shape.
-  const { data, error } = await db.from('admin_orders_view')
-    .select('*')
-    .order('created_at', { ascending: false })
-    .limit(100)
-  if (error) { toast('Orders error: ' + error.message, 'error'); console.error(error) }
-  state.orders = data || []
+  const [escrow, food, swift] = await Promise.all([
+    db.from('escrow_orders')
+      .select('id, status, amount_kobo, created_at, listing_id, listings(title), buyer:buyer_id(username), seller:seller_id(username)')
+      .order('created_at', { ascending: false }).limit(100),
+    db.from('food_orders')
+      .select('id, status, amount_kobo, items, created_at, buyer:buyer_id(username), seller:seller_id(username)')
+      .order('created_at', { ascending: false }).limit(100),
+    db.from('swift_orders')
+      .select('id, status, fee, errand_type, created_at, buyer:buyer_id(username), runner:runner_id(username)')
+      .order('created_at', { ascending: false }).limit(100),
+  ])
+  if (escrow.error) { toast('Escrow orders error: ' + escrow.error.message, 'error'); console.error(escrow.error) }
+  if (food.error) { toast('Food orders error: ' + food.error.message, 'error'); console.error(food.error) }
+  if (swift.error) { toast('Swift orders error: ' + swift.error.message, 'error'); console.error(swift.error) }
+
+  const normalized = [
+    ...(escrow.data || []).map(o => ({
+      id: o.id, type: 'escrow', title: o.listings?.title || 'Item',
+      buyerName: o.buyer?.username, sellerName: o.seller?.username,
+      amount: (o.amount_kobo || 0) / 100, status: o.status, created_at: o.created_at,
+    })),
+    ...(food.data || []).map(o => ({
+      id: o.id, type: 'food', title: (o.items || []).map(i => `${i.qty}× ${i.title}`).join(', ') || 'Food order',
+      buyerName: o.buyer?.username, sellerName: o.seller?.username,
+      amount: (o.amount_kobo || 0) / 100, status: o.status, created_at: o.created_at,
+    })),
+    ...(swift.data || []).map(o => ({
+      // swift_orders.fee is stored in naira already (not kobo, unlike the other two tables)
+      id: o.id, type: 'swift', title: o.errand_type === 'listing_pickup' ? 'Swift pickup' : 'Swift errand',
+      buyerName: o.buyer?.username, sellerName: o.runner?.username,
+      amount: o.fee || 0, status: o.status, created_at: o.created_at,
+    })),
+  ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+
+  state.orders = normalized
   renderOrders()
 }
 
@@ -787,20 +832,35 @@ async function deleteHubPost(postId) {
   loadHubPosts(); loadStats()
 }
 
-const ORDER_TABLE_BY_TYPE = {
-  escrow: 'escrow_orders',
-  food: 'food_orders',
-  swift: 'swift_orders',
+// Escrow/food orders can't have their status hand-edited from the admin —
+// 'paid_escrow'/'paid' -> 'released' moves real money into the seller's
+// wallet, and -> 'refunded' triggers an actual Paystack refund. Flipping
+// the status column alone (the old behaviour) would desync the DB from
+// reality — money wouldn't move, but the order would claim it had. So this
+// calls the same serverless endpoints the app itself uses for these
+// transitions, instead of writing the status column directly.
+async function callOrderApi(path, orderType, orderId) {
+  const res = await fetch(`/api/${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order_type: orderType, order_id: orderId }),
+  })
+  let data
+  try { data = await res.json() } catch { throw new Error(`Server didn't return JSON from /api/${path} (status ${res.status})`) }
+  if (!res.ok) throw new Error(data.error || 'Request failed')
+  return data
 }
 
-async function updateOrderStatus(orderId, status, orderType) {
-  // admin_orders_view is a read-only UNION of three tables, so writes have
-  // to go back to whichever real table the row came from.
-  const table = ORDER_TABLE_BY_TYPE[orderType]
-  if (!table) { toast('Unknown order type — cannot update', 'error'); return }
-  const { error } = await db.from(table).update({ status }).eq('id', orderId)
-  if (error) { toast('Order update failed: ' + error.message, 'error'); console.error(error); return }
-  toast('Order updated', 'success')
+async function releaseOrder(orderType, orderId) {
+  if (!confirmAction('Release this order? This credits the seller\'s wallet immediately.')) return
+  try { await callOrderApi('paystack-release', orderType, orderId); toast('✅ Order released to seller wallet', 'success') }
+  catch (err) { toast('Release failed: ' + err.message, 'error'); return }
+  loadOrders()
+}
+
+async function refundOrder(orderType, orderId) {
+  if (!confirmAction('Refund this order to the buyer via Paystack? This cannot be undone.')) return
+  try { await callOrderApi('paystack-refund', orderType, orderId); toast('↩️ Order refunded to buyer', 'success') }
+  catch (err) { toast('Refund failed: ' + err.message, 'error'); return }
   loadOrders()
 }
 
@@ -1082,13 +1142,6 @@ function renderApp() {
       <div class="sidebar-section-label">Commerce</div>
       ${navItem('listings','🛍','Listings')}
       ${navItem('orders','📦','Orders')}
-      ${navItem('wallet','💳','Wallet & Ledger')}
-    </div>
-    <div class="sidebar-section">
-      <div class="sidebar-section-label">Swift Delivery</div>
-      ${navItem('runner-apps','🛴','Runner Applications')}
-      ${navItem('runners','🏍','Active Runners')}
-      ${navItem('disputes','⚖️','Disputes')}
     </div>
     <div class="sidebar-section">
       <div class="sidebar-section-label">Ambassadors</div>
@@ -1097,13 +1150,8 @@ function renderApp() {
       ${navItem('amb-payouts','💰','Payouts')}
     </div>
     <div class="sidebar-section">
-      <div class="sidebar-section-label">Feedback</div>
-      ${navItem('feedback','💬','User Feedback')}
-    </div>
-    <div class="sidebar-section">
       <div class="sidebar-section-label">Settings</div>
       ${navItem('universities','🎓','Universities')}
-      ${navItem('broadcast','📣','Broadcast')}
     </div>
     <div class="sidebar-footer">
       <div class="sidebar-user">
@@ -1154,16 +1202,10 @@ function navigateTo(page) {
     hub: ['Hub Services', 'Post announcements to all campuses'],
     listings: ['Marketplace', 'Products and services listed'],
     orders: ['Orders', 'Track and manage orders'],
-    wallet: ['Wallet & Ledger', 'Transactions, P2P transfers, and payout accounts'],
-    'runner-apps': ['Runner Applications', 'Approve or decline Swift runner applicants'],
-    runners: ['Active Runners', 'Manage approved Swift runners'],
-    disputes: ['Disputes', 'Resolve open Swift delivery disputes'],
     universities: ['Universities', 'Manage campuses'],
     ambassadors: ['Ambassadors', 'Manage campus ambassadors'],
     'amb-referrals': ['Ambassador Referrals', 'All referrals across ambassadors'],
     'amb-payouts': ['Ambassador Payouts', 'Manage payout requests'],
-    feedback: ['User Feedback', 'Review and triage feedback submissions'],
-    broadcast: ['Broadcast', 'Send a notification to every user'],
   }
   const [title, sub] = titles[page] || [page, '']
   document.getElementById('topbar-title').textContent = title
@@ -1178,16 +1220,10 @@ function navigateTo(page) {
   else if (page === 'hub') { loadHubPosts(); }
   else if (page === 'listings') { loadListings(); }
   else if (page === 'orders') { loadOrders(); }
-  else if (page === 'wallet') { loadWallet(); }
-  else if (page === 'runner-apps') { loadRunnerApplications(); }
-  else if (page === 'runners') { loadActiveRunners(); }
-  else if (page === 'disputes') { loadDisputes(); }
   else if (page === 'universities') { loadUniversities(); }
   else if (page === 'ambassadors') { loadAmbassadors(); }
   else if (page === 'amb-referrals') { loadAmbReferrals(); }
   else if (page === 'amb-payouts') { loadAmbPayouts(); }
-  else if (page === 'feedback') { loadFeedback(); }
-  else if (page === 'broadcast') { renderBroadcast(); }
 }
 
 // ========================================================
@@ -1595,58 +1631,37 @@ async function removeListing(id) {
 // ========================================================
 // RENDER — ORDERS
 // ========================================================
-const ORDER_STATUS_OPTIONS = {
-  escrow: ['awaiting_payment', 'paid_escrow', 'released', 'refunded'],
-  food:   ['awaiting_payment', 'paid', 'delivered', 'released', 'refunded'],
-  swift:  ['searching', 'accepted', 'picked_up', 'delivered', 'completed', 'cancelled'],
-}
-
-const ORDER_TYPE_BADGE = {
-  escrow: { label: 'Escrow', cls: 'badge-post' },
-  food:   { label: 'Food', cls: 'badge-hub' },
-  swift:  { label: 'Swift', cls: 'badge-admin' },
-}
-
-function orderStatusBadgeClass(status) {
-  if (['delivered', 'completed', 'paid', 'released'].includes(status)) return 'badge-verified'
-  if (['cancelled', 'refunded', 'disputed'].includes(status)) return 'badge-banned'
-  if (['accepted', 'picked_up', 'paid_escrow'].includes(status)) return 'badge-hub'
-  return 'badge-restricted'
-}
-
 function renderOrders() {
   const pc = document.getElementById('page-content')
   if (!pc) return
   if (!state.orders.length) { pc.innerHTML = '<div class="empty"><div class="empty-icon">📦</div><div class="empty-title">No orders yet</div></div>'; return }
+  const TYPE_LABEL = { escrow: '🛍️ Escrow', food: '🍔 Food', swift: '🛵 Swift' }
+  const RELEASABLE = { escrow: 'paid_escrow', food: 'paid' } // status value that means "ready to release/refund"
+  const GOOD = ['released', 'delivered', 'completed']
+  const BAD = ['refunded', 'rejected', 'cancelled']
   pc.innerHTML = `
     <div class="card">
       <div class="card-header"><span class="card-title">All Orders</span><span class="card-count">${state.orders.length}</span></div>
-      <div style="padding:0 16px 12px;font-size:12px;color:var(--text3)">
-        ⚠️ Changing status here only edits the row — it does not move money.
-        Wallet credits/refunds only happen through the Paystack API
-        (release/refund endpoints), which use the service role key server-side.
-      </div>
+      <div style="font-size:12px;color:var(--text3);padding:0 16px 10px">Escrow &amp; Food orders can be force-released or refunded. Swift orders track delivery only — the payment sits in a linked escrow order.</div>
       <div style="overflow-x:auto">
         <table>
-          <thead><tr><th>Type</th><th>Item</th><th>Buyer → Seller</th><th>Amount</th><th>Qty</th><th>Status</th><th>Date</th><th>Update</th></tr></thead>
+          <thead><tr><th>Type</th><th>Item</th><th>Buyer → Seller/Runner</th><th>Amount</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
           <tbody>
-            ${state.orders.map(o => {
-              const typeInfo = ORDER_TYPE_BADGE[o.order_type] || { label: o.order_type, cls: 'badge-post' }
-              const statusOptions = ORDER_STATUS_OPTIONS[o.order_type] || [o.status]
-              return `<tr>
-              <td><span class="badge ${typeInfo.cls}">${typeInfo.label}</span></td>
-              <td style="font-weight:600;font-size:13px;max-width:180px">${o.listing_title || '—'}</td>
-              <td style="font-size:12px;color:var(--text2)">@${o.buyer_username || '?'} → @${o.seller_username || '?'}</td>
-              <td style="font-weight:700;color:var(--brand)">₦${Number((o.amount_kobo || 0) / 100).toLocaleString()}</td>
-              <td style="font-size:13px">${o.qty ?? 1}</td>
-              <td><span class="badge ${orderStatusBadgeClass(o.status)}">${o.status}</span></td>
+            ${state.orders.map(o => `<tr>
+              <td style="font-size:12px">${TYPE_LABEL[o.type]}</td>
+              <td style="font-weight:600;font-size:13px;max-width:180px">${o.title}</td>
+              <td style="font-size:12px;color:var(--text2)">@${o.buyerName||'?'} → @${o.sellerName||'?'}</td>
+              <td style="font-weight:700;color:var(--brand)">₦${Number(o.amount||0).toLocaleString()}</td>
+              <td><span class="badge ${GOOD.includes(o.status)?'badge-verified':BAD.includes(o.status)?'badge-banned':'badge-restricted'}">${o.status}</span></td>
               <td style="font-size:12px;color:var(--text3)">${fmtDate(o.created_at)}</td>
               <td>
-                <select class="filter-select" style="font-size:12px;padding:4px 8px" onchange="updateOrderStatus('${o.id}',this.value,'${o.order_type}')">
-                  ${statusOptions.map(s=>`<option value="${s}" ${o.status===s?'selected':''}>${s}</option>`).join('')}
-                </select>
+                ${RELEASABLE[o.type] && o.status === RELEASABLE[o.type] ? `
+                  <div style="display:flex;gap:6px">
+                    <button class="btn btn-success btn-sm" onclick="releaseOrder('${o.type}','${o.id}')">Release</button>
+                    <button class="btn btn-danger btn-sm" onclick="refundOrder('${o.type}','${o.id}')">Refund</button>
+                  </div>` : '<span style="color:var(--text3);font-size:12px">—</span>'}
               </td>
-            </tr>`}).join('')}
+            </tr>`).join('')}
           </tbody>
         </table>
       </div>
@@ -2037,341 +2052,6 @@ async function rejectPayout(id) {
   if (error) { toast('Failed', 'error'); return }
   toast('Payout rejected', 'info')
   loadAmbPayouts()
-}
-
-// ========================================================
-// SWIFT — RUNNER APPLICATIONS
-// ========================================================
-async function loadRunnerApplications() {
-  const { data, error } = await db.from('swift_runner_applications')
-    .select('*, profiles!swift_runner_applications_user_id_fkey(full_name, username), universities(name)')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-  const pc = document.getElementById('page-content')
-  if (!pc) return
-  if (error) { toast('Applications error: ' + error.message, 'error'); console.error(error) }
-  const apps = data || []
-  pc.innerHTML = `
-    <div class="card">
-      <div class="card-header"><span class="card-title">Pending Applications</span><span class="card-count">${apps.length}</span></div>
-      ${!apps.length ? `<div class="empty"><div class="empty-icon">🛴</div><div class="empty-title">No pending applications</div></div>` : `
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr><th>Applicant</th><th>University</th><th>Transport</th><th>Phone</th><th>Note</th><th>Date</th><th>Actions</th></tr></thead>
-          <tbody>
-            ${apps.map(a => `<tr>
-              <td style="font-weight:600;font-size:13px">${a.profiles?.full_name || a.profiles?.username || 'Unknown'}</td>
-              <td style="font-size:12px;color:var(--text2)">${a.universities?.name || '—'}</td>
-              <td style="font-size:13px;text-transform:capitalize">${a.transport_type || '—'}</td>
-              <td style="font-size:12px;color:var(--text2)">${a.phone || '—'}</td>
-              <td style="font-size:12px;color:var(--text3);max-width:200px">${a.note || '—'}</td>
-              <td style="font-size:12px;color:var(--text3)">${fmtDate(a.created_at)}</td>
-              <td>
-                <div style="display:flex;gap:6px">
-                  <button class="btn btn-success btn-sm" onclick="approveRunnerApp('${a.id}','${a.user_id}','${a.university_id}','${escAttr(a.transport_type||'')}')">✓ Approve</button>
-                  <button class="btn btn-danger btn-sm" onclick="declineRunnerApp('${a.id}')">✗ Decline</button>
-                </div>
-              </td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>`}
-    </div>`
-}
-
-async function approveRunnerApp(appId, userId, universityId, transportType) {
-  const { error: rErr } = await db.from('swift_runners').insert({
-    user_id: userId, university_id: universityId, transport_type: transportType,
-    status: 'active', is_online: false, created_at: new Date().toISOString(),
-  })
-  if (rErr) { toast('Could not approve — they may already be a runner: ' + rErr.message, 'error'); return }
-  const { error } = await db.from('swift_runner_applications').update({ status: 'approved' }).eq('id', appId)
-  if (error) { toast('Failed: ' + error.message, 'error'); return }
-  toast('✅ Runner approved', 'success')
-  loadRunnerApplications(); loadStats()
-}
-
-async function declineRunnerApp(appId) {
-  const reason = window.prompt('Reason for declining (shown to the applicant):') || 'Not approved at this time'
-  const { error } = await db.from('swift_runner_applications').update({ status: 'declined', decline_reason: reason }).eq('id', appId)
-  if (error) { toast('Failed: ' + error.message, 'error'); return }
-  toast('Application declined', 'info')
-  loadRunnerApplications(); loadStats()
-}
-
-// ========================================================
-// SWIFT — ACTIVE RUNNERS
-// ========================================================
-async function loadActiveRunners() {
-  const { data, error } = await db.from('swift_runners')
-    .select('*, profiles!swift_runners_user_id_fkey(full_name, username), universities(name)')
-    .order('created_at', { ascending: false })
-  const pc = document.getElementById('page-content')
-  if (!pc) return
-  if (error) { toast('Runners error: ' + error.message, 'error'); console.error(error) }
-  const runners = data || []
-  pc.innerHTML = `
-    <div class="card">
-      <div class="card-header"><span class="card-title">All Runners</span><span class="card-count">${runners.length}</span></div>
-      ${!runners.length ? `<div class="empty"><div class="empty-icon">🏍</div><div class="empty-title">No approved runners yet</div></div>` : `
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr><th>Runner</th><th>University</th><th>Transport</th><th>Rating</th><th>Status</th><th>Online</th><th>Actions</th></tr></thead>
-          <tbody>
-            ${runners.map(r => `<tr>
-              <td style="font-weight:600;font-size:13px">${r.profiles?.full_name || r.profiles?.username || 'Runner'}</td>
-              <td style="font-size:12px;color:var(--text2)">${r.universities?.name || '—'}</td>
-              <td style="font-size:13px;text-transform:capitalize">${r.transport_type || '—'}</td>
-              <td style="font-size:13px">${(r.avg_rating || 0).toFixed(1)}★ (${r.rating_count || 0})</td>
-              <td><span class="badge ${r.status === 'suspended' ? 'badge-banned' : 'badge-verified'}">${r.status}</span></td>
-              <td style="font-size:13px">${r.is_online ? '🟢 Online' : '⚪ Offline'}</td>
-              <td>
-                ${r.status === 'suspended'
-                  ? `<button class="btn btn-success btn-sm" onclick="reactivateRunner('${r.id}')">Reactivate</button>`
-                  : `<button class="btn btn-danger btn-sm" onclick="suspendRunner('${r.id}')">Suspend</button>`}
-              </td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>`}
-    </div>`
-}
-
-async function suspendRunner(id) {
-  if (!confirmAction('Suspend this runner? They will no longer receive delivery requests.')) return
-  const { error } = await db.from('swift_runners').update({ status: 'suspended', is_online: false }).eq('id', id)
-  if (error) { toast('Failed: ' + error.message, 'error'); return }
-  toast('Runner suspended', 'info')
-  loadActiveRunners()
-}
-
-async function reactivateRunner(id) {
-  const { error } = await db.from('swift_runners').update({ status: 'active' }).eq('id', id)
-  if (error) { toast('Failed: ' + error.message, 'error'); return }
-  toast('Runner reactivated', 'success')
-  loadActiveRunners()
-}
-
-// ========================================================
-// SWIFT — DISPUTES
-// ========================================================
-async function loadDisputes() {
-  const { data, error } = await db.from('swift_disputes')
-    .select('*, opener:profiles!swift_disputes_opened_by_fkey(full_name, username)')
-    .order('created_at', { ascending: true })
-  const pc = document.getElementById('page-content')
-  if (!pc) return
-  if (error) { toast('Disputes error: ' + error.message, 'error'); console.error(error) }
-  const disputes = data || []
-  const open = disputes.filter(d => d.status === 'open')
-  pc.innerHTML = `
-    <div style="display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap">
-      <div class="stat-card amber" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">${open.length}</div><div style="font-size:12px;color:var(--text2)">Open Disputes</div></div>
-      <div class="stat-card" style="flex:1;min-width:140px"><div style="font-size:22px;font-weight:800">${disputes.length}</div><div style="font-size:12px;color:var(--text2)">Total (all time)</div></div>
-    </div>
-    <div class="card">
-      <div class="card-header"><span class="card-title">Disputes</span><span class="card-count">${disputes.length}</span></div>
-      ${!disputes.length ? `<div class="empty"><div class="empty-icon">⚖️</div><div class="empty-title">No disputes</div></div>` : `
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr><th>Order</th><th>Reported by</th><th>Reason</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
-          <tbody>
-            ${disputes.map(d => `<tr>
-              <td style="font-size:12px;color:var(--text2)">#${String(d.order_id || '').slice(0, 8)}</td>
-              <td style="font-size:13px">${d.opener?.full_name || d.opener?.username || 'a user'}</td>
-              <td style="font-size:12px;color:var(--text2);max-width:260px">${d.reason || '—'}</td>
-              <td><span class="badge ${d.status === 'open' ? 'badge-restricted' : d.status === 'resolved' ? 'badge-verified' : 'badge-banned'}">${d.status}</span></td>
-              <td style="font-size:12px;color:var(--text3)">${fmtDate(d.created_at)}</td>
-              <td>
-                ${d.status === 'open' ? `
-                <div style="display:flex;gap:6px">
-                  <button class="btn btn-success btn-sm" onclick="resolveDispute('${d.id}')">Resolve</button>
-                  <button class="btn btn-ghost btn-sm" onclick="dismissDispute('${d.id}')">Dismiss</button>
-                </div>` : `<span style="color:var(--text3);font-size:12px">${d.status === 'resolved' ? 'Resolved ✓' : 'Dismissed'}</span>`}
-              </td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>`}
-    </div>`
-}
-
-async function resolveDispute(id) {
-  const { error } = await db.from('swift_disputes').update({ status: 'resolved', resolved_by: state.user.id, resolved_at: new Date().toISOString() }).eq('id', id)
-  if (error) { toast('Failed: ' + error.message, 'error'); return }
-  toast('✅ Dispute resolved', 'success')
-  loadDisputes(); loadStats()
-}
-
-async function dismissDispute(id) {
-  const { error } = await db.from('swift_disputes').update({ status: 'dismissed', resolved_by: state.user.id, resolved_at: new Date().toISOString() }).eq('id', id)
-  if (error) { toast('Failed: ' + error.message, 'error'); return }
-  toast('Dispute dismissed', 'info')
-  loadDisputes(); loadStats()
-}
-
-// ========================================================
-// FEEDBACK
-// ========================================================
-async function loadFeedback() {
-  const { data, error } = await db.from('feedback')
-    .select('*, profiles(full_name, username)')
-    .order('created_at', { ascending: false })
-    .limit(100)
-  const pc = document.getElementById('page-content')
-  if (!pc) return
-  if (error) { toast('Feedback error: ' + error.message, 'error'); console.error(error) }
-  const items = data || []
-  pc.innerHTML = `
-    <div class="card">
-      <div class="card-header"><span class="card-title">User Feedback</span><span class="card-count">${items.length}</span></div>
-      ${!items.length ? `<div class="empty"><div class="empty-icon">💬</div><div class="empty-title">No feedback yet</div></div>` : `
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr><th>From</th><th>Category</th><th>Title / Content</th><th>Rating</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
-          <tbody>
-            ${items.map(f => `<tr>
-              <td style="font-size:13px">${f.profiles?.full_name || f.profiles?.username || 'User'}</td>
-              <td style="font-size:12px;color:var(--text2);text-transform:capitalize">${f.category || '—'}</td>
-              <td style="max-width:260px">
-                <div style="font-weight:600;font-size:13px">${f.title || ''}</div>
-                <div style="font-size:12px;color:var(--text3)">${(f.content || '').slice(0, 120)}</div>
-              </td>
-              <td style="font-size:13px">${'★'.repeat(f.rating || 0)}${'☆'.repeat(5 - (f.rating || 0))}</td>
-              <td><span class="badge ${f.status === 'resolved' ? 'badge-verified' : f.status === 'reviewed' ? 'badge-hub' : 'badge-restricted'}">${f.status || 'pending'}</span></td>
-              <td style="font-size:12px;color:var(--text3)">${fmtDate(f.created_at)}</td>
-              <td>
-                <div style="display:flex;gap:6px">
-                  <button class="btn btn-ghost btn-sm" onclick="updateFeedbackStatus('${f.id}','reviewed')">Reviewed</button>
-                  <button class="btn btn-success btn-sm" onclick="updateFeedbackStatus('${f.id}','resolved')">Resolved</button>
-                </div>
-              </td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>`}
-    </div>`
-}
-
-async function updateFeedbackStatus(id, status) {
-  const { error } = await db.from('feedback').update({ status }).eq('id', id)
-  if (error) { toast('Failed: ' + error.message, 'error'); return }
-  toast('Feedback updated', 'success')
-  loadFeedback()
-}
-
-// ========================================================
-// WALLET & LEDGER (read-only oversight — actual money movement
-// happens server-side via /api/*.js with the service role key)
-// ========================================================
-async function loadWallet() {
-  const [txRes, p2pRes, payoutRecRes] = await Promise.all([
-    db.from('wallet_transactions').select('*, profiles(username, full_name)').order('created_at', { ascending: false }).limit(50),
-    db.from('p2p_transfers').select('*, sender:profiles!p2p_transfers_sender_id_fkey(username), receiver:profiles!p2p_transfers_receiver_id_fkey(username)').order('created_at', { ascending: false }).limit(50),
-    db.from('payout_recipients').select('*, profiles(username, full_name)').order('created_at', { ascending: false }).limit(50),
-  ])
-  const pc = document.getElementById('page-content')
-  if (!pc) return
-  const tx = txRes.data || [], p2p = p2pRes.data || [], recipients = payoutRecRes.data || []
-  if (txRes.error) console.error('wallet_transactions:', txRes.error)
-  if (p2pRes.error) console.error('p2p_transfers:', p2pRes.error)
-  if (payoutRecRes.error) console.error('payout_recipients:', payoutRecRes.error)
-
-  pc.innerHTML = `
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-header"><span class="card-title">Recent Wallet Transactions</span><span class="card-count">${tx.length}</span></div>
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr><th>User</th><th>Type</th><th>Amount</th><th>Note</th><th>Date</th></tr></thead>
-          <tbody>
-            ${tx.map(t => `<tr>
-              <td style="font-size:13px">${t.profiles?.full_name || t.profiles?.username || '—'}</td>
-              <td style="font-size:12px;color:var(--text2);text-transform:capitalize">${(t.type||'').replace(/_/g,' ')}</td>
-              <td style="font-weight:700;font-size:13px;color:${(t.amount_kobo||0) < 0 ? 'var(--red)' : 'var(--green)'}">${(t.amount_kobo||0) < 0 ? '-' : '+'}₦${Math.abs(Number(t.amount_kobo||0)/100).toLocaleString()}</td>
-              <td style="font-size:12px;color:var(--text3);max-width:200px">${t.note || '—'}</td>
-              <td style="font-size:12px;color:var(--text3)">${fmtDate(t.created_at)}</td>
-            </tr>`).join('') || `<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:20px">No transactions yet</td></tr>`}
-          </tbody>
-        </table>
-      </div>
-    </div>
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-header"><span class="card-title">P2P Transfers</span><span class="card-count">${p2p.length}</span></div>
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr><th>From</th><th>To</th><th>Amount</th><th>Note</th><th>Date</th></tr></thead>
-          <tbody>
-            ${p2p.map(t => `<tr>
-              <td style="font-size:13px">@${t.sender?.username || '?'}</td>
-              <td style="font-size:13px">@${t.receiver?.username || '?'}</td>
-              <td style="font-weight:700;font-size:13px;color:var(--brand)">₦${(Number(t.amount_kobo||0)/100).toLocaleString()}</td>
-              <td style="font-size:12px;color:var(--text3);max-width:200px">${t.note || '—'}</td>
-              <td style="font-size:12px;color:var(--text3)">${fmtDate(t.created_at)}</td>
-            </tr>`).join('') || `<tr><td colspan="5" style="text-align:center;color:var(--text3);padding:20px">No transfers yet</td></tr>`}
-          </tbody>
-        </table>
-      </div>
-    </div>
-    <div class="card">
-      <div class="card-header"><span class="card-title">Payout / Bank Accounts</span><span class="card-count">${recipients.length}</span></div>
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr><th>User</th><th>Bank</th><th>Account</th><th>Name on Account</th></tr></thead>
-          <tbody>
-            ${recipients.map(r => `<tr>
-              <td style="font-size:13px">${r.profiles?.full_name || r.profiles?.username || '—'}</td>
-              <td style="font-size:13px">${r.bank_name || '—'}</td>
-              <td style="font-size:13px">${r.account_number || '—'}</td>
-              <td style="font-size:13px">${r.account_name || '—'}</td>
-            </tr>`).join('') || `<tr><td colspan="4" style="text-align:center;color:var(--text3);padding:20px">No payout accounts on file</td></tr>`}
-          </tbody>
-        </table>
-      </div>
-    </div>`
-}
-
-// ========================================================
-// BROADCAST — send a notification row to every user
-// ========================================================
-function renderBroadcast() {
-  const pc = document.getElementById('page-content')
-  if (!pc) return
-  pc.innerHTML = `
-    <div class="card" style="max-width:520px">
-      <div class="card-header"><span class="card-title">📣 Broadcast Notification</span></div>
-      <div style="padding:16px">
-        <div style="font-size:13px;color:var(--text2);margin-bottom:16px">
-          Sends an in-app notification to every user on the platform. For campus-wide
-          feed posts use Hub Services instead — this is for account-level alerts
-          (e.g. maintenance windows, policy changes).
-        </div>
-        <div class="form-group"><label class="form-label">Title</label><input class="form-input" id="bc-title" placeholder="e.g. Scheduled maintenance tonight"></div>
-        <div class="form-group"><label class="form-label">Message</label><textarea class="form-textarea" id="bc-body" placeholder="Write the notification body…"></textarea></div>
-        <button class="btn btn-primary btn-full" onclick="sendBroadcast()">📣 Send to All Users</button>
-      </div>
-    </div>`
-}
-
-async function sendBroadcast() {
-  const title = document.getElementById('bc-title')?.value.trim()
-  const body = document.getElementById('bc-body')?.value.trim()
-  if (!title || !body) { toast('Fill in both fields', 'error'); return }
-  if (!confirmAction(`Send this notification to every user? This can't be undone.`)) return
-  const { data: profiles, error: pErr } = await db.from('profiles').select('id')
-  if (pErr) { toast('Could not load user list: ' + pErr.message, 'error'); return }
-  const rows = (profiles || []).map(p => ({
-    user_id: p.id, type: 'broadcast', title, body, is_read: false, created_at: new Date().toISOString(),
-  }))
-  if (!rows.length) { toast('No users to notify', 'error'); return }
-  // Batch in chunks to stay well under request size limits.
-  const CHUNK = 500
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const { error } = await db.from('notifications').insert(rows.slice(i, i + CHUNK))
-    if (error) { toast('Broadcast partially failed: ' + error.message, 'error'); return }
-  }
-  toast(`📣 Sent to ${rows.length} users`, 'success')
-  document.getElementById('bc-title').value = ''
-  document.getElementById('bc-body').value = ''
 }
 
 // ========================================================
