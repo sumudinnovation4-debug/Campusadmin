@@ -415,6 +415,15 @@
 const SUPABASE_URL = 'https://zgzamthhfykhjaldosvb.supabase.co'
 const SUPABASE_ANON_KEY = 'sb_publishable_T2qRKGsS33YJPN3BochPTA_r2v_gSlS'
 
+// This dashboard is deployed on its OWN Vercel project/domain
+// (campusadmin.vercel.app), separate from the main camplugie app
+// (camplugie.com) — but the /api/paystack-*, /api/wallet-* and /api/admin-*
+// serverless functions only exist in that OTHER project. So every call to
+// them from here has to be an absolute URL pointing at camplugie.com, not a
+// relative '/api/...' path (which would just 404 against this project's
+// own, empty /api).
+const SITE_API_BASE = 'https://camplugie.com'
+
 const ADMIN_EMAILS = [
   'opemuhammad35@gmail.com',
   'sumudinnovation4@gmail.com',
@@ -842,7 +851,7 @@ async function deleteHubPost(postId) {
 // calls the same serverless endpoints the app itself uses for these
 // transitions, instead of writing the status column directly.
 async function callOrderApi(path, orderType, orderId) {
-  const res = await fetch(`/api/${path}`, {
+  const res = await fetch(`${SITE_API_BASE}/api/${path}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ order_type: orderType, order_id: orderId }),
   })
@@ -858,7 +867,7 @@ async function callOrderApi(path, orderType, orderId) {
 // that a real payment already brought onto the platform).
 async function callAdminApi(path, body) {
   const { data: { session } } = await db.auth.getSession()
-  const res = await fetch(`/api/${path}`, {
+  const res = await fetch(`${SITE_API_BASE}/api/${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session?.access_token || ''}` },
     body: JSON.stringify(body),
