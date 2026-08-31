@@ -891,6 +891,12 @@ async function uploadImageToCloudinary(file) {
   if (!res.ok) throw new Error(data?.error?.message || 'Image upload failed')
   return data.secure_url
 }
+// Same as above, for forms that accept several receipt photos on one entry.
+async function uploadImagesToCloudinary(files) {
+  const urls = []
+  for (const file of files) urls.push(await uploadImageToCloudinary(file))
+  return urls
+}
 
 async function releaseOrder(orderType, orderId) {
   if (!confirmAction('Release this order? This credits the seller\'s wallet immediately.')) return
@@ -1212,6 +1218,10 @@ function renderApp() {
       ${navItem('amb-payouts','💰','Payouts')}
     </div>
     <div class="sidebar-section">
+      <div class="sidebar-section-label">Books</div>
+      ${navItem('books','📚','Books')}
+    </div>
+    <div class="sidebar-section">
       <div class="sidebar-section-label">Finance</div>
       ${navItem('wallets','💳','Wallets')}
       ${navItem('ledger','📒','Transactions')}
@@ -1282,7 +1292,7 @@ function navigateTo(page) {
     'amb-referrals': ['Ambassador Referrals', 'All referrals across ambassadors'],
     'amb-payouts': ['Ambassador Payouts', 'Manage payout requests'],
     wallets: ['Wallets', 'Every user\'s in-app balance'],
-    ledger: ['Transactions', 'Full wallet transaction ledger'],
+    books: ['Books', 'Income, expenses, investment money & receipts'],    ledger: ['Transactions', 'Full wallet transaction ledger'],
     'payout-accounts': ['Payout Accounts', 'Bank accounts linked for withdrawals'],
     p2p: ['P2P Transfers', 'Wallet-to-wallet transfers between users'],
     groups: ['Groups', 'Campus chat groups'],
@@ -1307,6 +1317,7 @@ function navigateTo(page) {
   else if (page === 'amb-referrals') { loadAmbReferrals(); }
   else if (page === 'amb-payouts') { loadAmbPayouts(); }
   else if (page === 'wallets') { loadWallets(); }
+  else if (page === 'books') { loadBooks(); }
   else if (page === 'ledger') { loadLedger(); }
   else if (page === 'payout-accounts') { loadPayoutAccounts(); }
   else if (page === 'p2p') { loadP2P(); }
@@ -1755,6 +1766,148 @@ function renderOrders() {
         </table>
       </div>
     </div>`
+}
+
+// ========================================================
+// BOOKS — internal ledger (income / expense / investment / ambassador payments)
+// ========================================================
+let booksTypeFilter = 'all'
+let bookReceiptFiles = []
+
+async function loadBooks() {
+  let q = db.from('book_entries').select('*, creator:created_by(username)').order('entry_date', { ascending: false }).order('created_at', { ascending: false }).limit(300)
+  if (booksTypeFilter !== 'all') q = q.eq('type', booksTypeFilter)
+  const { data, error } = await q
+  if (error) { toast('Books error: ' + error.message, 'error'); console.error(error) }
+  state.books = data || []
+  renderBooks()
+}
+
+function renderBooks() {
+  const pc = document.getElementById('page-content')
+  if (!pc) return
+  const sum = (t) => (state.books||[]).filter(e=>e.type===t).reduce((a,e)=>a+(e.amount_kobo||0),0)
+  const income = sum('income'), expense = sum('expense'), investment = sum('investment'), ambPay = sum('ambassador_payment')
+  const net = income + investment - expense - ambPay
+  const TYPE_LABEL = { income: '💰 Income', expense: '💸 Expense', investment: '🏗️ Investment', ambassador_payment: '🎯 Ambassador Payment' }
+  const TYPE_COLOR = { income: 'var(--green)', investment: 'var(--blue)', expense: 'var(--red)', ambassador_payment: 'var(--orange)' }
+
+  pc.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px">
+      <div class="stat-card green"><div style="font-size:18px;font-weight:800">₦${Number(income/100).toLocaleString()}</div><div style="font-size:12px;color:var(--text2)">Income</div></div>
+      <div class="stat-card blue"><div style="font-size:18px;font-weight:800">₦${Number(investment/100).toLocaleString()}</div><div style="font-size:12px;color:var(--text2)">Investment in</div></div>
+      <div class="stat-card red"><div style="font-size:18px;font-weight:800">₦${Number(expense/100).toLocaleString()}</div><div style="font-size:12px;color:var(--text2)">Expenses</div></div>
+      <div class="stat-card orange"><div style="font-size:18px;font-weight:800">₦${Number(ambPay/100).toLocaleString()}</div><div style="font-size:12px;color:var(--text2)">Ambassador payouts</div></div>
+      <div class="stat-card purple"><div style="font-size:18px;font-weight:800">₦${Number(net/100).toLocaleString()}</div><div style="font-size:12px;color:var(--text2)">Net (shown entries)</div></div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Books</span>
+        <select class="filter-select" onchange="booksTypeFilter=this.value;loadBooks()">
+          <option value="all" ${booksTypeFilter==='all'?'selected':''}>All types</option>
+          <option value="income" ${booksTypeFilter==='income'?'selected':''}>Income</option>
+          <option value="expense" ${booksTypeFilter==='expense'?'selected':''}>Expense</option>
+          <option value="investment" ${booksTypeFilter==='investment'?'selected':''}>Investment</option>
+          <option value="ambassador_payment" ${booksTypeFilter==='ambassador_payment'?'selected':''}>Ambassador Payment</option>
+        </select>
+        <button class="btn btn-primary btn-sm" onclick="openBookEntryModal()">+ New Entry</button>
+        <span class="card-count">${state.books.length}</span>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Date</th><th>Type</th><th>Category</th><th>Counterparty</th><th>Amount</th><th>Description</th><th>Receipts</th><th>Logged by</th><th></th></tr></thead>
+          <tbody>
+            ${state.books.map(e => `<tr>
+              <td style="font-size:12px;color:var(--text3);white-space:nowrap">${e.entry_date}</td>
+              <td style="font-size:12px;color:${TYPE_COLOR[e.type]}">${TYPE_LABEL[e.type]||e.type}</td>
+              <td style="font-size:13px">${e.category||'—'}</td>
+              <td style="font-size:13px">${e.counterparty||'—'}</td>
+              <td style="font-weight:700;color:${TYPE_COLOR[e.type]}">₦${Number((e.amount_kobo||0)/100).toLocaleString()}</td>
+              <td style="font-size:12px;color:var(--text2);max-width:220px">${e.description||'—'}</td>
+              <td>${(e.receipt_urls||[]).length ? (e.receipt_urls||[]).map(u=>`<a href="${u}" target="_blank" rel="noopener"><img src="${u}" style="width:28px;height:28px;object-fit:cover;border-radius:4px;margin-right:3px;border:1px solid var(--border)"></a>`).join('') : '<span style="color:var(--text3);font-size:12px">—</span>'}</td>
+              <td style="font-size:12px;color:var(--text3)">@${e.creator?.username||'?'}</td>
+              <td><button class="btn btn-danger btn-sm" onclick="deleteBookEntry('${e.id}')">✕</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+
+function openBookEntryModal() {
+  bookReceiptFiles = []
+  let el = document.getElementById('modal-root')
+  if (!el) { el = document.createElement('div'); el.id = 'modal-root'; document.body.appendChild(el) }
+  el.innerHTML = `
+  <div class="modal-bg" onclick="if(event.target===this)closeModal()">
+    <div class="modal" style="max-width:460px">
+      <div class="modal-header"><span class="modal-title">📚 New Book Entry</span><button class="modal-close" onclick="closeModal()">✕</button></div>
+      <div class="modal-body">
+        <div class="form-group"><label class="form-label">Type</label>
+          <select class="form-input" id="book-type">
+            <option value="income">💰 Income</option>
+            <option value="expense">💸 Expense</option>
+            <option value="investment">🏗️ Investment in</option>
+            <option value="ambassador_payment">🎯 Ambassador Payment</option>
+          </select>
+        </div>
+        <div class="form-group"><label class="form-label">Date</label><input class="form-input" id="book-date" type="date" value="${new Date().toISOString().slice(0,10)}"></div>
+        <div class="form-group"><label class="form-label">Category</label><input class="form-input" id="book-category" placeholder="e.g. Hosting, Marketing, Founder investment"></div>
+        <div class="form-group"><label class="form-label">Counterparty</label><input class="form-input" id="book-counterparty" placeholder="Who paid or was paid"></div>
+        <div class="form-group"><label class="form-label">Amount (₦)</label><input class="form-input" id="book-amount" type="number" min="1" placeholder="e.g. 25000"></div>
+        <div class="form-group"><label class="form-label">Description</label><textarea class="form-textarea" id="book-desc" placeholder="Notes about this entry"></textarea></div>
+        <div class="form-group">
+          <label class="form-label">Receipt photo(s)</label>
+          <input type="file" accept="image/*" multiple id="book-receipts-input" onchange="handleBookReceiptSelect(event)">
+          <div id="book-receipts-preview" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitBookEntry()">Save Entry</button>
+      </div>
+    </div>
+  </div>`
+}
+
+function handleBookReceiptSelect(e) {
+  bookReceiptFiles = Array.from(e.target.files || [])
+  const preview = document.getElementById('book-receipts-preview')
+  if (preview) preview.textContent = bookReceiptFiles.length ? `📎 ${bookReceiptFiles.length} photo(s) selected — will upload on save` : ''
+}
+
+async function submitBookEntry() {
+  const type = document.getElementById('book-type')?.value
+  const entry_date = document.getElementById('book-date')?.value
+  const category = document.getElementById('book-category')?.value.trim()
+  const counterparty = document.getElementById('book-counterparty')?.value.trim()
+  const amountNaira = Number(document.getElementById('book-amount')?.value)
+  const description = document.getElementById('book-desc')?.value.trim()
+  if (!amountNaira || amountNaira <= 0) { toast('Enter a valid amount', 'error'); return }
+  if (!entry_date) { toast('Pick a date', 'error'); return }
+
+  let receipt_urls = []
+  if (bookReceiptFiles.length) {
+    try { receipt_urls = await uploadImagesToCloudinary(bookReceiptFiles) }
+    catch (err) { toast('Receipt upload failed: ' + err.message, 'error'); return }
+  }
+
+  const { error } = await db.from('book_entries').insert({
+    type, entry_date, category: category || null, counterparty: counterparty || null,
+    amount_kobo: Math.round(amountNaira * 100), description: description || null,
+    receipt_urls, created_by: state.user.id,
+  })
+  if (error) { toast('Failed: ' + error.message, 'error'); return }
+  toast('✅ Entry saved', 'success')
+  closeModal(); loadBooks()
+}
+
+async function deleteBookEntry(id) {
+  if (!confirmAction('Delete this book entry? This cannot be undone.')) return
+  const { error } = await db.from('book_entries').delete().eq('id', id)
+  if (error) { toast('Delete failed: ' + error.message, 'error'); return }
+  toast('Entry deleted', 'success')
+  loadBooks()
 }
 
 // ========================================================
